@@ -1,0 +1,13 @@
+[package]
+name = "taku"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "taku"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+taku-runtime.workspace = true

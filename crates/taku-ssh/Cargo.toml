@@ -1,0 +1,12 @@
+[package]
+name = "taku-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mlua.workspace = true
+taku-shell.workspace = true
+taku-fs.workspace = true
+taku-net.workspace = true
+taku-env.workspace = true

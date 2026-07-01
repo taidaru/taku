@@ -1,0 +1,24 @@
+{
+  "version": "0.0.0-test",
+  "description": "Lua-configured automation for repetitive dev tasks, with a safe cross-platform Rust core.",
+  "homepage": "https://github.com/taidaru/taku",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/taidaru/taku/releases/download/v0.0.0-test/taku-x86_64-pc-windows-msvc.zip",
+      "hash": "00a483563e90edd3cd3ec2dcee95e31e79d9b0ee72765312fd04937cc3435b49"
+    }
+  },
+  "bin": "taku.exe",
+  "checkver": {
+    "url": "https://github.com/taidaru/taku/releases.atom",
+    "regex": "releases/tag/v([\\d.]+(?:-[\\w.]+)?)"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/taidaru/taku/releases/download/v$version/taku-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}

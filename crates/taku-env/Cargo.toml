@@ -1,0 +1,9 @@
+[package]
+name = "taku-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mlua.workspace = true
+dotenvy = "0.15"

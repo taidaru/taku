@@ -1,0 +1,93 @@
+use std::io::{self, Write};
+use std::process::{Output, Stdio};
+
+use crate::host::Host;
+use crate::tunnel::Tunnel;
+use crate::util::remote_failure;
+
+impl Host {
+    pub(crate) fn exec(&self, remote: &str, stdin: Option<&[u8]>) -> io::Result<Output> {
+        let mut cmd = self.ssh_command(remote);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+        let mut child = cmd.spawn()?;
+        if let Some(data) = stdin {
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("ssh stdin was not piped"))?
+                .write_all(data)?;
+        }
+        child.wait_with_output()
+    }
+
+    pub(crate) fn run_streaming(&self, remote: &str, stdin: Option<&[u8]>) -> mlua::Result<i32> {
+        let ctx = || format!("ssh.run({}, {remote})", self.destination());
+        let mut cmd = self.ssh_command(remote);
+        let status = match stdin {
+            None => cmd.status().map_err(|e| self.spawn_error(&ctx(), &e))?,
+            Some(data) => {
+                cmd.stdin(Stdio::piped());
+                let mut child = cmd.spawn().map_err(|e| self.spawn_error(&ctx(), &e))?;
+                let mut stdin = child.stdin.take().ok_or_else(|| {
+                    mlua::Error::external(format!("{}: stdin was not piped", ctx()))
+                })?;
+                stdin
+                    .write_all(data)
+                    .map_err(|e| self.spawn_error(&ctx(), &e))?;
+                child.wait().map_err(|e| self.spawn_error(&ctx(), &e))?
+            }
+        };
+        Ok(status.code().unwrap_or(-1))
+    }
+
+    pub(crate) fn checked(
+        &self,
+        ctx: &str,
+        remote: &str,
+        stdin: Option<&[u8]>,
+    ) -> mlua::Result<Vec<u8>> {
+        let out = self
+            .exec(remote, stdin)
+            .map_err(|e| self.spawn_error(ctx, &e))?;
+        if !out.status.success() {
+            return Err(remote_failure(ctx, &out));
+        }
+        Ok(out.stdout)
+    }
+
+    pub(crate) fn succeeds(&self, remote: &str) -> bool {
+        self.exec(remote, None)
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn try_output(&self, ctx: &str, remote: &str) -> mlua::Result<(bool, Vec<u8>)> {
+        let out = self
+            .exec(remote, None)
+            .map_err(|e| self.spawn_error(ctx, &e))?;
+        Ok((out.status.success(), out.stdout))
+    }
+
+    pub(crate) fn open_tunnel(&self, host: &str, port: u16) -> mlua::Result<Tunnel> {
+        let ctx = format!("ssh -W {host}:{port}");
+        let mut cmd = self.ssh_base();
+        cmd.arg("-W").arg(format!("{host}:{port}"));
+        cmd.arg(self.destination());
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| self.spawn_error(&ctx, &e))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| mlua::Error::external(format!("{ctx}: stdin was not piped")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| mlua::Error::external(format!("{ctx}: stdout was not piped")))?;
+        Ok(Tunnel::new(child, stdin, stdout))
+    }
+}
