@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 
 use crate::report::Style;
 
+/// Source lines of context shown above and below the offending line.
+const CONTEXT: usize = 2;
+
 struct Locus {
     path: PathBuf,
     line: usize,
@@ -10,15 +13,7 @@ struct Locus {
 
 pub(crate) fn render(err: &mlua::Error, style: &Style) -> String {
     let full = err.to_string();
-    let Some(locus) = find_locus(&full) else {
-        return full;
-    };
-    let Ok(source) = std::fs::read_to_string(&locus.path) else {
-        return full;
-    };
-    let Some(src_line) = source.lines().nth(locus.line - 1) else {
-        return full;
-    };
+    let (head, traceback) = split_traceback(&full);
 
     let is_syntax = matches!(innermost(err), mlua::Error::SyntaxError { .. });
     let label = if is_syntax {
@@ -27,47 +22,119 @@ pub(crate) fn render(err: &mlua::Error, style: &Style) -> String {
         "runtime error"
     };
 
-    let (message, traceback) = split_traceback(&full[locus.msg_start..]);
-    let message = message.trim();
+    let (locus, message) = match find_locus(head) {
+        Some(locus) => {
+            let message = head[locus.msg_start..].trim().to_string();
+            (Some(locus), message)
+        }
+        None => (
+            locus_from_traceback(traceback.as_deref()),
+            clean_message(head),
+        ),
+    };
 
-    let (col, width) = caret_span(src_line, is_syntax.then(|| near_token(&full)).flatten());
+    let window = locus.as_ref().and_then(|l| {
+        let source = std::fs::read_to_string(&l.path).ok()?;
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        (l.line >= 1 && l.line <= lines.len()).then_some(lines)
+    });
 
     let mut out = String::new();
     out.push_str(label);
     out.push('\n');
 
-    let display = display_path(&locus.path);
-    let gutter = " ".repeat(locus.line.to_string().len());
     let bar = style.cyan("|");
 
-    out.push_str(&format!(
-        "{gutter}{arrow} {display}:{line}:{col}\n",
-        arrow = style.cyan("-->"),
-        line = locus.line,
-    ));
-    out.push_str(&format!("{gutter} {bar}\n"));
-    out.push_str(&format!(
-        "{num} {bar} {src_line}\n",
-        num = style.dim(&locus.line.to_string()),
-    ));
-    let carets = style.red(&"^".repeat(width.max(1)));
-    let pad = " ".repeat(col.saturating_sub(1));
-    if message.is_empty() {
-        out.push_str(&format!("{gutter} {bar} {pad}{carets}\n"));
-    } else {
-        out.push_str(&format!("{gutter} {bar} {pad}{carets} {message}\n"));
-    }
+    if let (Some(locus), Some(lines)) = (&locus, &window) {
+        let src_line = &lines[locus.line - 1];
+        let token = if is_syntax {
+            near_token(head)
+        } else {
+            named_symbol(&message)
+        };
+        let (col, width) = caret_span(src_line, token);
 
-    if let Some(frames) = traceback {
+        let first = locus.line.saturating_sub(CONTEXT).max(1);
+        let last = (locus.line + CONTEXT).min(lines.len());
+        let gutter_w = last.to_string().len();
+        let gutter = " ".repeat(gutter_w);
+
+        let display = display_path(&locus.path);
+        out.push_str(&format!(
+            "{gutter}{arrow} {display}:{line}:{col}\n",
+            arrow = style.cyan("-->"),
+            line = locus.line,
+        ));
         out.push_str(&format!("{gutter} {bar}\n"));
-        out.push_str("stack traceback:\n");
-        for frame in frames {
-            out.push_str(&format!("   {}\n", style.dim(frame)));
+
+        for n in first..=last {
+            let num = format!("{n:>gutter_w$}");
+            out.push_str(&format!(
+                "{num} {bar} {text}\n",
+                num = style.dim(&num),
+                text = lines[n - 1],
+            ));
+            if n == locus.line {
+                let carets = style.red(&"^".repeat(width.max(1)));
+                let pad = " ".repeat(col.saturating_sub(1));
+                if message.is_empty() {
+                    out.push_str(&format!("{gutter} {bar} {pad}{carets}\n"));
+                } else {
+                    out.push_str(&format!("{gutter} {bar} {pad}{carets} {message}\n"));
+                }
+            }
+        }
+
+        if let Some(frames) = &traceback {
+            out.push_str(&format!("{gutter} {bar}\n"));
+            render_traceback(&mut out, style, frames);
+        }
+    } else {
+        if !message.is_empty() {
+            out.push_str(&format!("  {message}\n"));
+        }
+        if let Some(frames) = &traceback {
+            out.push('\n');
+            render_traceback(&mut out, style, frames);
         }
     }
 
     out.pop();
     out
+}
+
+fn render_traceback(out: &mut String, style: &Style, frames: &[&str]) {
+    out.push_str("stack traceback:\n");
+    for frame in frames {
+        out.push_str(&format!("   {}\n", style.dim(frame)));
+    }
+}
+
+fn clean_message(head: &str) -> String {
+    let trimmed = head.trim();
+    for pre in ["runtime error: ", "syntax error: "] {
+        if let Some(rest) = trimmed.strip_prefix(pre) {
+            return rest.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn locus_from_traceback(frames: Option<&[&str]>) -> Option<Locus> {
+    frames?.iter().find_map(|frame| find_locus(frame))
+}
+
+fn named_symbol(msg: &str) -> Option<&str> {
+    for kind in ["global", "local", "field", "method", "upvalue", "constant"] {
+        let open = format!("({kind} '");
+        if let Some(i) = msg.find(&open) {
+            let start = i + open.len();
+            if let Some(rel) = msg[start..].find('\'') {
+                return Some(&msg[start..start + rel]);
+            }
+        }
+    }
+    None
 }
 
 fn innermost(err: &mlua::Error) -> &mlua::Error {
@@ -223,9 +290,70 @@ mod tests {
     }
 
     #[test]
-    fn missing_locus_falls_back_to_raw_message() {
+    fn runtime_caret_points_at_the_named_symbol() {
+        let path = write_temp("sym.lua", "task('x', function()\n    boom()\nend)\n");
+        let msg = format!(
+            "{}:2: attempt to call a nil value (global 'boom')",
+            path.display()
+        );
+        let err = mlua::Error::RuntimeError(msg);
+        let out = render(&err, &plain());
+
+        let caret_line = out.lines().find(|l| l.contains('^')).unwrap();
+        assert_eq!(
+            caret_line.matches('^').count(),
+            4,
+            "width of `boom`:\n{out}"
+        );
+        let src_line = out.lines().find(|l| l.contains("boom()")).unwrap();
+        assert_eq!(
+            caret_line.find('^').unwrap(),
+            src_line.find("boom").unwrap(),
+            "caret not under boom:\n{out}"
+        );
+    }
+
+    #[test]
+    fn external_error_keeps_its_message_via_traceback_frame() {
+        let path = write_temp("ext.lua", "task('x', { desc = 'x' })\n");
+        let msg = format!(
+            "task('x'): spec table has no `run` function\nstack traceback:\n\t{}:1: in main chunk",
+            path.display()
+        );
+        let err = mlua::Error::RuntimeError(msg);
+        let out = render(&err, &plain());
+
+        assert!(
+            out.contains("spec table has no `run` function"),
+            "real message dropped:\n{out}"
+        );
+        let caret_line = out.lines().find(|l| l.contains('^')).unwrap();
+        assert!(
+            caret_line.contains("spec table has no `run` function"),
+            "message not attached to the caret:\n{out}"
+        );
+    }
+
+    #[test]
+    fn context_lines_surround_the_offending_line() {
+        let path = write_temp("ctx.lua", "before()\nboom()\nafter()\n");
+        let msg = format!(
+            "{}:2: attempt to call a nil value (global 'boom')",
+            path.display()
+        );
+        let err = mlua::Error::RuntimeError(msg);
+        let out = render(&err, &plain());
+
+        assert!(out.contains("before()"), "missing line above:\n{out}");
+        assert!(out.contains("after()"), "missing line below:\n{out}");
+    }
+
+    #[test]
+    fn missing_locus_still_shows_the_message() {
         let err = mlua::Error::RuntimeError("something broke with no location".into());
-        assert_eq!(render(&err, &plain()), err.to_string());
+        let out = render(&err, &plain());
+        assert!(out.starts_with("runtime error\n"), "{out}");
+        assert!(out.contains("something broke with no location"), "{out}");
     }
 
     #[test]
