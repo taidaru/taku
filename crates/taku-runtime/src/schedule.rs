@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -112,11 +113,24 @@ fn run_task(path: &Path, source: &str, name: &str, style: &Style) -> Result<(), 
     match catch_unwind(body) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(Error::Lua(e))) => Err(format!(
-            "task '{name}' failed: {}",
+            "task '{name}' failed\n{}",
             crate::diagnostic::render(&e, style)
         )),
         Ok(Err(e)) => Err(format!("task '{name}' failed: {e}")),
-        Err(_) => Err(format!("task '{name}' panicked")),
+        Err(payload) => Err(format!(
+            "task '{name}' panicked: {}",
+            panic_message(payload.as_ref())
+        )),
+    }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
