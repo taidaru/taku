@@ -10,6 +10,9 @@ ssh.run("deploy@host", { "uptime" })             -- код выхода
 local r = ssh.capture("deploy@host", { "hostname" })
 ```
 
+Они повторяют [`sh.run`/`sh.capture`](sh) — тот же список аргументов и тот же
+результат `{ code, stdout, stderr }` у `capture`, но выполняются на удалённом хосте.
+
 ## Целый блок на удалённой машине
 
 Внутри `ssh.on` обычные глобалы `sh`/`fs`/`net`/`env` на время блока действуют на
