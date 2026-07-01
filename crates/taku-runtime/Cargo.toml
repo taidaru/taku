@@ -1,0 +1,13 @@
+[package]
+name = "taku-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mlua.workspace = true
+taku-fs.workspace = true
+taku-net.workspace = true
+taku-shell.workspace = true
+taku-ssh.workspace = true
+taku-env.workspace = true
