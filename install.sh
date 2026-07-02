@@ -24,7 +24,7 @@ arch="$(uname -m)"
 case "$os" in
   Linux)  os_part="unknown-linux-gnu" ;;
   Darwin) os_part="apple-darwin" ;;
-  *) err "unsupported OS '$os'. On Windows, download the installer from https://github.com/$REPO/releases/latest" ;;
+  *) err "unsupported OS '$os'. On Windows, install via Scoop" ;;
 esac
 
 case "$arch" in
