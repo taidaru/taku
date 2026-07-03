@@ -12,14 +12,14 @@ installers = ["shell", "powershell", "homebrew", "msi"]
 # A GitHub repo to push Homebrew formulas to
 tap = "taidaru/taku"
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew", "./scoop"]
-# Publish prereleases too (versions are alpha/beta-tagged)
+# Whether to publish prereleases to package managers
 publish-prereleases = true
 # Whether to install an updater program
-install-updater = true
+install-updater = false
 # Checksums to generate for each App
 checksum = "sha256"
