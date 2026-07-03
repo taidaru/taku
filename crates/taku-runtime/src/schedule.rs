@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::mpsc;
@@ -17,7 +18,7 @@ pub(crate) fn execute(
     path: &Path,
     source: &str,
     plan: &Plan,
-    jobs: Option<usize>,
+    jobs: Option<NonZeroUsize>,
 ) -> Result<usize, Error> {
     let mut indegree: HashMap<&str, usize> = plan
         .deps
@@ -45,10 +46,8 @@ pub(crate) fn execute(
     let mut ready: VecDeque<&str> = roots.into();
 
     let max = jobs
-        .filter(|&j| j > 0)
-        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
-        .unwrap_or(1)
-        .max(1);
+        .or_else(|| std::thread::available_parallelism().ok())
+        .map_or(1, NonZeroUsize::get);
     let mut running = 0;
     let mut first_err: Option<Error> = None;
     let worker_style = *style;
@@ -96,6 +95,8 @@ pub(crate) fn execute(
                     report::task_failed(style, &name, elapsed);
                     if first_err.is_none() {
                         first_err = Some(Error::TaskFailed(message));
+                    } else {
+                        eprintln!("{}", style.error(&message));
                     }
                 }
             }
@@ -135,7 +136,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 }
 
 fn run_task_body(path: &Path, source: &str, name: &str) -> Result<(), Error> {
-    let lua = build_state(path, source)?;
+    let lua = build_state(path, source, false)?;
     let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
     let spec: Table = tasks
         .get::<Option<Table>>(name)?

@@ -209,6 +209,9 @@ fn near_token(msg: &str) -> Option<&str> {
     Some(&msg[start..end])
 }
 
+// Best-effort: the token is looked up by its *first* occurrence in the line
+// (Lua reports only line numbers), so a repeated token may caret the wrong
+// one. Falls back to the first non-blank column.
 fn caret_span(src_line: &str, token: Option<&str>) -> (usize, usize) {
     if let Some(tok) = token.filter(|t| !t.is_empty())
         && let Some(byte) = src_line.find(tok)

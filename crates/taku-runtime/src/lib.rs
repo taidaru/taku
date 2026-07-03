@@ -1,10 +1,12 @@
 mod diagnostic;
 mod error;
 mod plan;
+mod registry;
 mod report;
 mod schedule;
 mod state;
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -25,12 +27,17 @@ pub struct Runtime {
 impl Runtime {
     pub fn load() -> Result<Runtime, Error> {
         let path = find_takufile().ok_or(Error::TakufileNotFound)?;
-        let source = std::fs::read_to_string(&path)?;
-        let lua = build_state(&path, &source)?;
+        let source = std::fs::read_to_string(&path).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("{}: {e}", path.display()),
+            ))
+        })?;
+        let lua = build_state(&path, &source, true)?;
         Ok(Runtime { lua, path, source })
     }
 
-    pub fn run(&self, command: &str, jobs: Option<usize>) -> Result<(), Error> {
+    pub fn run(&self, command: &str, jobs: Option<NonZeroUsize>) -> Result<(), Error> {
         let plan = plan::build(&self.lua, &self.path, command)?;
         let style = report::Style::init();
 

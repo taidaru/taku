@@ -3,6 +3,9 @@ name = "taku-fs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 mlua.workspace = true
+taku-api.workspace = true

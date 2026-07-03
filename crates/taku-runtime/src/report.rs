@@ -8,8 +8,10 @@ pub(crate) struct Style {
 
 impl Style {
     pub(crate) fn init() -> Self {
+        // any non-empty NO_COLOR disables colour.
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
         Style {
-            color: std::io::stderr().is_terminal(),
+            color: !no_color && std::io::stderr().is_terminal(),
         }
     }
 

@@ -6,6 +6,8 @@ members = ["crates/*"]
 version = "0.1.2-alpha"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/taidaru/taku"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Lua engine. `vendored` builds Lua from source (no system Lua needed)
@@ -13,6 +15,7 @@ mlua = { version = "0.11", features = ["lua54", "vendored"] }
 clap = { version = "4", features = ["derive"] }
 
 taku-runtime = { path = "crates/taku-runtime" }
+taku-api = { path = "crates/taku-api" }
 taku-fs = { path = "crates/taku-fs" }
 taku-net = { path = "crates/taku-net" }
 taku-shell = { path = "crates/taku-shell" }

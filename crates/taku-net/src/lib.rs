@@ -5,7 +5,6 @@ use std::net::TcpStream;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use mlua::Lua;
 use ureq::Agent;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,40 +39,30 @@ impl Net for Local {
     }
 
     fn http_get(&self, url: &str) -> mlua::Result<Vec<u8>> {
-        http::get(agent(), url).map_err(|e| ext(url, e))
+        http::get(agent(), url).map_err(|e| ext(&format!("net.http_get({url})"), e))
     }
 
     fn download(&self, url: &str, path: &str) -> mlua::Result<()> {
-        let body = http::get_large(agent(), url).map_err(|e| ext(url, e))?;
-        std::fs::write(path, body).map_err(|e| ext(&format!("net.download -> {path}"), e))
+        let ctx = format!("net.download({url} -> {path})");
+        let mut body = http::get_reader(agent(), url).map_err(|e| ext(&ctx, e))?;
+        let mut file = std::fs::File::create(path).map_err(|e| ext(&ctx, e))?;
+        std::io::copy(&mut body, &mut file).map_err(|e| ext(&ctx, e))?;
+        Ok(())
     }
 }
 
-pub fn register(lua: &Lua, net: Arc<dyn Net>) -> mlua::Result<()> {
-    let tbl = lua.create_table()?;
+pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
+    global: "net",
+    register: |lua, _ctx| register(lua, Arc::new(Local)),
+};
 
-    let n = net.clone();
-    tbl.set(
-        "tcp_request",
-        lua.create_function(
-            move |lua, (host, port, data): (String, u16, mlua::String)| {
-                let resp = n.tcp_request(&host, port, &data.as_bytes())?;
-                lua.create_string(resp)
-            },
-        )?,
-    )?;
-
-    let n = net.clone();
-    tbl.set(
-        "http_get",
-        lua.create_function(move |lua, url: String| lua.create_string(n.http_get(&url)?))?,
-    )?;
-
-    tbl.set(
-        "download",
-        lua.create_function(move |_, (url, path): (String, String)| net.download(&url, &path))?,
-    )?;
-
-    lua.globals().set("net", tbl)?;
-    Ok(())
+taku_api::lua_api! {
+    pub fn register(global = "net", backend: Net as n) {
+        tcp_request => |lua, (host, port, data): (String, u16, mlua::String)| {
+            let resp = n.tcp_request(&host, port, &data.as_bytes())?;
+            lua.create_string(resp)
+        },
+        http_get => |lua, url: String| lua.create_string(n.http_get(&url)?),
+        download => |_, (url, path): (String, String)| n.download(&url, &path),
+    }
 }
