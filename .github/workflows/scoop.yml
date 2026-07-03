@@ -1,6 +1,7 @@
 # Custom cargo-dist publish job ("./scoop" in dist-workspace.toml publish-jobs):
 # invoked from release.yml after the GitHub Release.
-# Updates the Scoop manifest (bucket/taku.json) on the default branch.
+# Updates the Scoop manifest (bucket/taku.json) in the taidaru/homebrew-taku
+# packages repo (also the Homebrew tap), which has no branch protection.
 name: publish-scoop
 
 on:
@@ -19,10 +20,11 @@ jobs:
     steps:
       # The caller grants this job only id-token/packages permissions, so
       # GITHUB_TOKEN cannot push; reuse the same PAT the homebrew publish job
-      # uses to push to this repo.
+      # uses to push to the packages repo. Cross-repo checkout defaults to
+      # that repo's default branch.
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          repository: taidaru/homebrew-taku
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           persist-credentials: true
 
