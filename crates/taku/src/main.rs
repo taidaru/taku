@@ -24,10 +24,12 @@ task("build", {
     desc = "build the project",
     run = function()
         -- Commands are argument lists, run directly (no shell): { "prog", "arg", ... }.
-        local code = sh.run({ "echo", "replace me with your build command" })
-        if code ~= 0 then
-            error("build failed (exit " .. code .. ")")
-        end
+        -- For example:
+        --   local code = sh.run({ "cargo", "build" })
+        --   if code ~= 0 then
+        --       error("build failed (exit " .. code .. ")")
+        --   end
+        print("replace me with your build command")
     end,
 })
 "#;
