@@ -72,16 +72,16 @@ binary, and put it on your `PATH`:
 
 - Linux: `taku-x86_64-unknown-linux-gnu.tar.xz` (also `musl` and `aarch64` variants)
 - macOS: `taku-aarch64-apple-darwin.tar.xz` (Apple silicon) or `taku-x86_64-apple-darwin.tar.xz`
-- Windows: `taku-x86_64-pc-windows-msvc.zip` (also an `aarch64` variant)
+- Windows: `taku-x86_64-pc-windows-msvc.zip`
 
 Each archive has a matching `.sha256` checksum file. The tarballs unpack into
 a `taku-<target>/` directory; the zips unpack flat.
 
 ## Updating
 
-Installs done with the install scripts (and release archives) include a
-`taku-update` helper — run it to update to the latest release. Homebrew and
-Scoop installs update through the package manager as usual.
+To update an install done with the install scripts, re-run the same install
+command — it fetches and installs the latest release over the existing one.
+Homebrew and Scoop installs update through the package manager as usual.
 
 ## From source
 

@@ -39,13 +39,10 @@ jobs:
           tag="$(jq -r '.announcement_tag' <<<"$PLAN")"
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
           hash_x64="$(sha256sum artifacts/taku-x86_64-pc-windows-msvc.zip | cut -d' ' -f1)"
-          hash_arm64="$(sha256sum artifacts/taku-aarch64-pc-windows-msvc.zip | cut -d' ' -f1)"
           jq --arg v "$version" \
              --arg ux "$base/taku-x86_64-pc-windows-msvc.zip"   --arg hx "$hash_x64" \
-             --arg ua "$base/taku-aarch64-pc-windows-msvc.zip"  --arg ha "$hash_arm64" \
              '.version = $v
-              | .architecture."64bit".url = $ux | .architecture."64bit".hash = $hx
-              | .architecture.arm64.url   = $ua | .architecture.arm64.hash   = $ha' \
+              | .architecture."64bit".url = $ux | .architecture."64bit".hash = $hx' \
             bucket/taku.json > bucket/taku.json.tmp
           mv bucket/taku.json.tmp bucket/taku.json
 
