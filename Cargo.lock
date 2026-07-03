@@ -542,11 +542,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "taku-api"
+version = "0.1.2-alpha"
+dependencies = [
+ "mlua",
+]
+
+[[package]]
 name = "taku-env"
 version = "0.1.2-alpha"
 dependencies = [
  "dotenvy",
  "mlua",
+ "taku-api",
 ]
 
 [[package]]
@@ -554,6 +562,7 @@ name = "taku-fs"
 version = "0.1.2-alpha"
 dependencies = [
  "mlua",
+ "taku-api",
 ]
 
 [[package]]
@@ -561,6 +570,7 @@ name = "taku-net"
 version = "0.1.2-alpha"
 dependencies = [
  "mlua",
+ "taku-api",
  "ureq",
 ]
 
@@ -569,6 +579,7 @@ name = "taku-runtime"
 version = "0.1.2-alpha"
 dependencies = [
  "mlua",
+ "taku-api",
  "taku-env",
  "taku-fs",
  "taku-net",
@@ -581,6 +592,7 @@ name = "taku-shell"
 version = "0.1.2-alpha"
 dependencies = [
  "mlua",
+ "taku-api",
 ]
 
 [[package]]
@@ -588,6 +600,7 @@ name = "taku-ssh"
 version = "0.1.2-alpha"
 dependencies = [
  "mlua",
+ "taku-api",
  "taku-env",
  "taku-fs",
  "taku-net",

@@ -13,7 +13,12 @@ use ureq::unversioned::transport::{
 };
 
 const TIMEOUT: Duration = Duration::from_secs(30);
-const DOWNLOAD_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+/// `net.http_get` buffers the body in memory (and hands it to Lua), so it
+/// gets a deliberately modest cap; `net.download` streams to disk and only
+/// caps against unbounded responses.
+const GET_LIMIT: u64 = 64 * 1024 * 1024;
+const DOWNLOAD_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
 
 fn config() -> Config {
     Config::builder().timeout_global(Some(TIMEOUT)).build()
@@ -36,22 +41,29 @@ pub fn dialer_agent(dialer: Arc<dyn Dialer>) -> Agent {
 }
 
 pub fn get(agent: &Agent, url: &str) -> Result<Vec<u8>, ureq::Error> {
-    agent.get(url).call()?.body_mut().read_to_vec()
-}
-
-pub fn get_large(agent: &Agent, url: &str) -> Result<Vec<u8>, ureq::Error> {
     agent
         .get(url)
         .call()?
         .body_mut()
         .with_config()
-        .limit(DOWNLOAD_LIMIT)
+        .limit(GET_LIMIT)
         .read_to_vec()
+}
+
+pub fn get_reader(agent: &Agent, url: &str) -> Result<impl io::Read + use<>, ureq::Error> {
+    Ok(agent
+        .get(url)
+        .call()?
+        .into_body()
+        .into_with_config()
+        .limit(DOWNLOAD_LIMIT)
+        .reader())
 }
 
 struct StreamTransport {
     stream: Box<dyn Stream>,
     buffers: LazyBuffers,
+    open: bool,
 }
 
 impl fmt::Debug for StreamTransport {
@@ -72,15 +84,21 @@ impl Transport for StreamTransport {
         Ok(())
     }
 
+    // The reads block without a deadline: a generic `dyn Stream` (an ssh -W
+    // pipe) has no portable read timeout, so the agent's timeout config can't
+    // be honoured here.
     fn await_input(&mut self, _timeout: NextTimeout) -> Result<bool, ureq::Error> {
         let input = self.buffers.input_append_buf();
         let amount = self.stream.read(input)?;
+        if amount == 0 {
+            self.open = false;
+        }
         self.buffers.input_appended(amount);
         Ok(amount > 0)
     }
 
     fn is_open(&mut self) -> bool {
-        true
+        self.open
     }
 }
 
@@ -118,10 +136,16 @@ impl<In: Transport> Connector<In> for DialConnector {
             details.config.input_buffer_size(),
             details.config.output_buffer_size(),
         );
-        Ok(Some(StreamTransport { stream, buffers }))
+        Ok(Some(StreamTransport {
+            stream,
+            buffers,
+            open: true,
+        }))
     }
 }
 
+/// The dialer connects by host name, so DNS never runs; ureq still insists on
+/// a resolved address, so hand it a placeholder that nothing ever dials.
 #[derive(Debug)]
 struct NullResolver;
 

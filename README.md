@@ -96,7 +96,10 @@ taku run <task>        # run a task and its dependencies (alias: r)
 taku run <task> -j N   # limit parallelism (default: CPU count)
 ```
 
-Taku searches the current directory and its parents for `Takufile.lua`.
+Taku looks for `Takufile.lua` in the current directory.
+
+With `-j` above 1 (the default is the CPU count), the output of parallel tasks
+is interleaved; pass `-j 1` for strictly sequential output.
 
 ## Available APIs
 
@@ -122,6 +125,7 @@ The workspace consists of:
 
 * `taku` — CLI executable
 * `taku-runtime` — Lua runtime and task scheduler
+* `taku-api` — shared registration plumbing for the API crates
 * `taku-fs`
 * `taku-shell`
 * `taku-net`

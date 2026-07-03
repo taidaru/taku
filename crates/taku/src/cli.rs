@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -14,8 +16,9 @@ pub enum Command {
     Run {
         task: String,
 
+        /// Maximum number of tasks to run in parallel (at least 1)
         #[arg(short, long, value_name = "N")]
-        jobs: Option<usize>,
+        jobs: Option<NonZeroUsize>,
     },
     #[command(visible_alias = "ls")]
     List,

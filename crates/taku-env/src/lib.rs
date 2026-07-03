@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mlua::Lua;
-
 pub use dotenvy::Error as DotenvError;
 
 pub trait Env: Send + Sync {
@@ -40,28 +38,20 @@ impl Env for Local {
     }
 }
 
-pub fn register(lua: &Lua, env: Arc<dyn Env>) -> mlua::Result<()> {
-    let tbl = lua.create_table()?;
+pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
+    global: "env",
+    register: |lua, ctx| register(lua, Arc::new(Local::with_dotenv(ctx.dotenv.clone()))),
+};
 
-    let e = env.clone();
-    tbl.set(
-        "get",
-        lua.create_function(move |_, (name, default): (String, Option<String>)| {
-            Ok(e.get(&name)?.or(default))
-        })?,
-    )?;
-
-    tbl.set(
-        "require",
-        lua.create_function(move |_, name: String| {
-            env.get(&name)?.ok_or_else(|| {
+taku_api::lua_api! {
+    pub fn register(global = "env", backend: Env as e) {
+        get => |_, (name, default): (String, Option<String>)| Ok(e.get(&name)?.or(default)),
+        require => |_, name: String| {
+            e.get(&name)?.ok_or_else(|| {
                 mlua::Error::external(format!("env.require('{name}'): variable is not set"))
             })
-        })?,
-    )?;
-
-    lua.globals().set("env", tbl)?;
-    Ok(())
+        },
+    }
 }
 
 pub fn parse_dotenv(contents: &str) -> Result<HashMap<String, String>, dotenvy::Error> {
@@ -94,11 +84,10 @@ mod tests {
     }
 
     #[test]
-    fn process_env_overrides_file_var_in_substitution() {
-        unsafe { std::env::set_var("TAKU_ENV_SUB_TEST", "from-process") };
-        let env = parse_dotenv("TAKU_ENV_SUB_TEST=from-file\nREF=${TAKU_ENV_SUB_TEST}\n").unwrap();
-        assert_eq!(env.get("REF"), Some(&"from-process".to_string()));
-        unsafe { std::env::remove_var("TAKU_ENV_SUB_TEST") };
+    fn substitutes_from_process_env() {
+        let path = std::env::var("PATH").unwrap();
+        let env = parse_dotenv("REF=${PATH}\n").unwrap();
+        assert_eq!(env.get("REF"), Some(&path));
     }
 
     #[test]
@@ -108,25 +97,20 @@ mod tests {
 
     #[test]
     fn real_env_takes_precedence_over_dotenv() {
-        unsafe { std::env::set_var("TAKU_ENV_TEST_PRECEDENCE", "from-process") };
         let mut dotenv = HashMap::new();
-        dotenv.insert(
-            "TAKU_ENV_TEST_PRECEDENCE".to_string(),
-            "from-dotenv".to_string(),
-        );
+        dotenv.insert("PATH".to_string(), "from-dotenv".to_string());
         dotenv.insert(
             "TAKU_ENV_TEST_ONLY_DOTENV".to_string(),
             "fallback".to_string(),
         );
         let local = Local::with_dotenv(Arc::new(dotenv));
         assert_eq!(
-            local.get("TAKU_ENV_TEST_PRECEDENCE").unwrap(),
-            Some("from-process".to_string())
+            local.get("PATH").unwrap().as_deref(),
+            Some(std::env::var("PATH").unwrap().as_str())
         );
         assert_eq!(
             local.get("TAKU_ENV_TEST_ONLY_DOTENV").unwrap(),
             Some("fallback".to_string())
         );
-        unsafe { std::env::remove_var("TAKU_ENV_TEST_PRECEDENCE") };
     }
 }

@@ -3,9 +3,12 @@ name = "taku-ssh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 mlua.workspace = true
+taku-api.workspace = true
 taku-shell.workspace = true
 taku-fs.workspace = true
 taku-net.workspace = true

@@ -1,5 +1,7 @@
-use std::io::{self, Write};
+use std::io::{self, Read};
 use std::process::{Output, Stdio};
+
+use taku_shell::{wait_status_with_input, wait_with_input};
 
 use crate::host::Host;
 use crate::tunnel::Tunnel;
@@ -14,34 +16,19 @@ impl Host {
         } else {
             Stdio::null()
         });
-        let mut child = cmd.spawn()?;
-        if let Some(data) = stdin {
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| io::Error::other("ssh stdin was not piped"))?
-                .write_all(data)?;
-        }
-        child.wait_with_output()
+        let child = cmd.spawn()?;
+        wait_with_input(child, stdin)
     }
 
     pub(crate) fn run_streaming(&self, remote: &str, stdin: Option<&[u8]>) -> mlua::Result<i32> {
         let ctx = || format!("ssh.run({}, {remote})", self.destination());
         let mut cmd = self.ssh_command(remote);
-        let status = match stdin {
-            None => cmd.status().map_err(|e| self.spawn_error(&ctx(), &e))?,
-            Some(data) => {
-                cmd.stdin(Stdio::piped());
-                let mut child = cmd.spawn().map_err(|e| self.spawn_error(&ctx(), &e))?;
-                let mut stdin = child.stdin.take().ok_or_else(|| {
-                    mlua::Error::external(format!("{}: stdin was not piped", ctx()))
-                })?;
-                stdin
-                    .write_all(data)
-                    .map_err(|e| self.spawn_error(&ctx(), &e))?;
-                child.wait().map_err(|e| self.spawn_error(&ctx(), &e))?
-            }
-        };
+        if stdin.is_some() {
+            cmd.stdin(Stdio::piped());
+        }
+        let child = cmd.spawn().map_err(|e| self.spawn_error(&ctx(), &e))?;
+        let status =
+            wait_status_with_input(child, stdin).map_err(|e| self.spawn_error(&ctx(), &e))?;
         Ok(status.code().unwrap_or(-1))
     }
 
@@ -60,10 +47,48 @@ impl Host {
         Ok(out.stdout)
     }
 
-    pub(crate) fn succeeds(&self, remote: &str) -> bool {
-        self.exec(remote, None)
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    /// Streams `input` into the remote command's stdin (for bodies too large
+    /// to buffer). The command is expected to produce no stdout of its own
+    /// (`cat > file`), so a sequential copy cannot deadlock on a full pipe.
+    pub(crate) fn checked_stream(
+        &self,
+        ctx: &str,
+        remote: &str,
+        input: &mut dyn Read,
+    ) -> mlua::Result<()> {
+        let mut cmd = self.ssh_command(remote);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| self.spawn_error(ctx, &e))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| mlua::Error::external(format!("{ctx}: stdin was not piped")))?;
+        let copied = io::copy(input, &mut stdin);
+        drop(stdin); // EOF for the remote command
+        let out = child
+            .wait_with_output()
+            .map_err(|e| self.spawn_error(ctx, &e))?;
+        if !out.status.success() {
+            return Err(remote_failure(ctx, &out));
+        }
+        copied.map_err(|e| crate::util::ext(ctx, e))?;
+        Ok(())
+    }
+
+    /// Runs a remote `test`-style command and maps its exit code: 0 → true,
+    /// 1 → false. Anything else (ssh itself exits 255 when the connection or
+    /// auth fails) is an error, so a network failure can't read as "false".
+    pub(crate) fn test(&self, ctx: &str, remote: &str) -> mlua::Result<bool> {
+        let out = self
+            .exec(remote, None)
+            .map_err(|e| self.spawn_error(ctx, &e))?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(remote_failure(ctx, &out)),
+        }
     }
 
     pub(crate) fn try_output(&self, ctx: &str, remote: &str) -> mlua::Result<(bool, Vec<u8>)> {
@@ -77,6 +102,7 @@ impl Host {
         let ctx = format!("ssh -W {host}:{port}");
         let mut cmd = self.ssh_base();
         cmd.arg("-W").arg(format!("{host}:{port}"));
+        cmd.arg("--");
         cmd.arg(self.destination());
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| self.spawn_error(&ctx, &e))?;

@@ -1,8 +1,6 @@
 use std::process::Output;
 
-pub(crate) fn ext<E: std::fmt::Display>(ctx: &str, e: E) -> mlua::Error {
-    mlua::Error::external(format!("{ctx}: {e}"))
-}
+pub(crate) use taku_api::ext;
 
 pub(crate) fn shq(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);

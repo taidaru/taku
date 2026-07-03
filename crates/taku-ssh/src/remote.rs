@@ -70,14 +70,23 @@ impl taku_fs::FileSystem for Host {
         )?;
         Ok(())
     }
-    fn exists(&self, path: &str) -> bool {
-        self.succeeds(&format!("test -e {}", shq(path)))
+    fn exists(&self, path: &str) -> mlua::Result<bool> {
+        self.test(
+            &format!("fs.exists({path})"),
+            &format!("test -e {}", shq(path)),
+        )
     }
-    fn is_file(&self, path: &str) -> bool {
-        self.succeeds(&format!("test -f {}", shq(path)))
+    fn is_file(&self, path: &str) -> mlua::Result<bool> {
+        self.test(
+            &format!("fs.is_file({path})"),
+            &format!("test -f {}", shq(path)),
+        )
     }
-    fn is_dir(&self, path: &str) -> bool {
-        self.succeeds(&format!("test -d {}", shq(path)))
+    fn is_dir(&self, path: &str) -> mlua::Result<bool> {
+        self.test(
+            &format!("fs.is_dir({path})"),
+            &format!("test -d {}", shq(path)),
+        )
     }
     fn mkdir(&self, path: &str) -> mlua::Result<()> {
         self.checked(
@@ -171,14 +180,13 @@ impl taku_net::Net for Host {
 
     fn download(&self, url: &str, path: &str) -> mlua::Result<()> {
         let agent = taku_net::http::dialer_agent(Arc::new(self.clone()));
-        let body = taku_net::http::get_large(&agent, url)
+        let mut body = taku_net::http::get_reader(&agent, url)
             .map_err(|e| ext(&format!("net.download({url})"), e))?;
-        self.checked(
+        self.checked_stream(
             &format!("net.download({url} -> {path})"),
             &format!("cat > {}", shq(path)),
-            Some(&body),
-        )?;
-        Ok(())
+            &mut body,
+        )
     }
 }
 

@@ -14,27 +14,36 @@ pub(crate) const TAKUFILE: &str = "Takufile.lua";
 
 pub(crate) const TASKS_KEY: &str = "taku.tasks";
 
-pub(crate) fn build_state(path: &Path, source: &str) -> Result<Lua, Error> {
+/// Builds the canonical Lua state. `warnings` is set only for the state the
+/// planner loads: workers rebuild the same state per task, and re-printing
+/// every warning once per task would be noise.
+pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<Lua, Error> {
     let lua = new_sandboxed()?;
     let base = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // A missing/unreadable `.env` yields an empty map; a malformed one is an error.
+    // A missing `.env` yields an empty map; an unreadable or malformed one is
+    // an error — silently running without the intended variables is worse.
     let dotenv = Arc::new(match fs::read_to_string(base.join(".env")) {
         Ok(contents) => taku_env::parse_dotenv(&contents)?,
-        Err(_) => HashMap::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(e) => {
+            return Err(Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("{}: {e}", base.join(".env").display()),
+            )));
+        }
     });
 
     register_import(&lua, base)?;
-    register_task(&lua)?;
+    register_task(&lua, warnings)?;
 
-    taku_fs::register(&lua, Arc::new(taku_fs::Local))?;
-    taku_net::register(&lua, Arc::new(taku_net::Local))?;
-    taku_shell::register(&lua, Arc::new(taku_shell::Local))?;
-    taku_ssh::register(&lua, dotenv.clone())?;
-    taku_env::register(&lua, Arc::new(taku_env::Local::with_dotenv(dotenv)))?;
+    let ctx = taku_api::RegisterCtx { dotenv };
+    for api in crate::registry::apis() {
+        (api.register)(&lua, &ctx)?;
+    }
 
     lua.load(source)
         .set_name(format!("@{}", path.to_string_lossy()))
@@ -99,11 +108,11 @@ fn register_import(lua: &Lua, base_dir: PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-fn register_task(lua: &Lua) -> Result<(), Error> {
+fn register_task(lua: &Lua, warnings: bool) -> Result<(), Error> {
     let tasks = lua.create_table()?;
     lua.set_named_registry_value(TASKS_KEY, &tasks)?;
 
-    let task = lua.create_function(|lua, (name, def): (String, Value)| {
+    let task = lua.create_function(move |lua, (name, def): (String, Value)| {
         let spec = lua.create_table()?;
 
         match def {
@@ -135,6 +144,11 @@ fn register_task(lua: &Lua) -> Result<(), Error> {
         }
 
         let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
+        if warnings && tasks.contains_key(&*name)? {
+            eprintln!(
+                "taku: warning: task '{name}' is defined more than once; the last definition wins"
+            );
+        }
         tasks.set(name, spec)?;
         Ok(())
     })?;
@@ -154,15 +168,21 @@ mod tests {
 
     #[test]
     fn sandbox_hides_dangerous_libs_but_keeps_the_apis() {
-        let src = r#"
-            for _, name in ipairs({ "io", "os", "package", "debug", "dofile", "loadfile" }) do
-                assert(_G[name] == nil, name .. " should not be reachable in the sandbox")
-            end
-            for _, name in ipairs({ "fs", "sh", "net", "ssh", "env", "task", "import" }) do
-                assert(_G[name] ~= nil, name .. " API should be present")
-            end
-        "#;
-        build_state(Path::new("Takufile.lua"), src).unwrap();
+        let lua = build_state(Path::new("Takufile.lua"), "", true).unwrap();
+        let globals = lua.globals();
+        for name in ["io", "os", "package", "debug", "dofile", "loadfile"] {
+            let value: Value = globals.get(name).unwrap();
+            assert!(
+                value.is_nil(),
+                "{name} should not be reachable in the sandbox"
+            );
+        }
+        let apis = crate::registry::apis();
+        let expected = apis.iter().map(|api| api.global).chain(["task", "import"]);
+        for name in expected {
+            let value: Value = globals.get(name).unwrap();
+            assert!(!value.is_nil(), "{name} API should be present");
+        }
     }
 
     #[test]
@@ -174,7 +194,7 @@ mod tests {
         let src = "import('child.lua')\nimport('child.lua')\nassert(count == 1, 'imported twice')";
         std::fs::write(&main, src).unwrap();
 
-        let result = build_state(&main, src);
+        let result = build_state(&main, src, true);
         std::fs::remove_dir_all(&dir).unwrap();
         result.unwrap();
     }

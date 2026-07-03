@@ -1,6 +1,6 @@
 use std::fmt::Display;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{self, Write};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::Arc;
 
 use mlua::{Lua, Table, Value};
@@ -28,7 +28,7 @@ pub struct Local;
 impl Local {
     fn command(argv: &[String], opts: &Opts) -> Command {
         // Callers must pass a non-empty argv (enforced at the Lua boundary by
-        // `parse_argv`); this guards the invariant for direct Rust callers.
+        // `parse_argv`).
         debug_assert!(!argv.is_empty(), "argv must be non-empty");
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]);
@@ -44,23 +44,62 @@ fn err<E: Display>(op: &str, argv: &[String], e: E) -> mlua::Error {
     mlua::Error::external(format!("sh.{op}({}): {e}", argv.join(" ")))
 }
 
+fn feed(stdin: &mut ChildStdin, data: &[u8]) -> io::Result<()> {
+    match stdin.write_all(data).and_then(|()| stdin.flush()) {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        res => res,
+    }
+}
+
+/// Feeds `data` to a piped child stdin from its own thread. Writing stdin to
+/// completion before reading any output would deadlock as soon as the child
+/// fills its stdout pipe, so the feed and the wait must proceed concurrently.
+fn spawn_feeder<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    stdin: Option<ChildStdin>,
+    data: Option<&'scope [u8]>,
+) -> Option<std::thread::ScopedJoinHandle<'scope, io::Result<()>>> {
+    let (mut stdin, data) = stdin.zip(data)?;
+    Some(scope.spawn(move || {
+        let res = feed(&mut stdin, data);
+        drop(stdin); // close the pipe so the child sees EOF
+        res
+    }))
+}
+
+fn finish<T>(
+    out: io::Result<T>,
+    feeder: Option<std::thread::ScopedJoinHandle<'_, io::Result<()>>>,
+) -> io::Result<T> {
+    let fed = feeder.map_or(Ok(()), |f| f.join().expect("stdin feeder thread panicked"));
+    out.and_then(|v| fed.map(|()| v))
+}
+
+pub fn wait_with_input(mut child: Child, data: Option<&[u8]>) -> io::Result<Output> {
+    let stdin = child.stdin.take();
+    std::thread::scope(|scope| {
+        let feeder = spawn_feeder(scope, stdin, data);
+        finish(child.wait_with_output(), feeder)
+    })
+}
+
+pub fn wait_status_with_input(mut child: Child, data: Option<&[u8]>) -> io::Result<ExitStatus> {
+    let stdin = child.stdin.take();
+    std::thread::scope(|scope| {
+        let feeder = spawn_feeder(scope, stdin, data);
+        finish(child.wait(), feeder)
+    })
+}
+
 impl Shell for Local {
     fn run(&self, argv: &[String], opts: &Opts) -> mlua::Result<i32> {
         let mut command = Local::command(argv, opts);
-        let status = match &opts.stdin {
-            None => command.status().map_err(|e| err("run", argv, e))?,
-            Some(data) => {
-                command.stdin(Stdio::piped());
-                let mut child = command.spawn().map_err(|e| err("run", argv, e))?;
-                child
-                    .stdin
-                    .take()
-                    .ok_or_else(|| err("run", argv, "could not open child stdin"))?
-                    .write_all(data)
-                    .map_err(|e| err("run", argv, e))?;
-                child.wait().map_err(|e| err("run", argv, e))?
-            }
-        };
+        if opts.stdin.is_some() {
+            command.stdin(Stdio::piped());
+        }
+        let child = command.spawn().map_err(|e| err("run", argv, e))?;
+        let status = wait_status_with_input(child, opts.stdin.as_deref())
+            .map_err(|e| err("run", argv, e))?;
         Ok(status.code().unwrap_or(-1))
     }
 
@@ -72,18 +111,9 @@ impl Shell for Local {
         } else {
             Stdio::null()
         });
-        let mut child = command.spawn().map_err(|e| err("capture", argv, e))?;
-        if let Some(data) = &opts.stdin {
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| err("capture", argv, "could not open child stdin"))?
-                .write_all(data)
-                .map_err(|e| err("capture", argv, e))?;
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| err("capture", argv, e))?;
+        let child = command.spawn().map_err(|e| err("capture", argv, e))?;
+        let out =
+            wait_with_input(child, opts.stdin.as_deref()).map_err(|e| err("capture", argv, e))?;
         Ok(Capture {
             code: out.status.code().unwrap_or(-1),
             stdout: out.stdout,
@@ -131,32 +161,29 @@ fn parse_opts(opts: Option<Table>) -> mlua::Result<Opts> {
             for pair in env.pairs::<String, String>() {
                 out.env.push(pair?);
             }
+            // Lua table order is arbitrary; sort so downstream consumers that
+            // serialize the env (the remote `env ...` line in taku-ssh) are
+            // deterministic.
             out.env.sort();
         }
     }
     Ok(out)
 }
 
-pub fn register(lua: &Lua, shell: Arc<dyn Shell>) -> mlua::Result<()> {
-    let sh = lua.create_table()?;
+pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
+    global: "sh",
+    register: |lua, _ctx| register(lua, Arc::new(Local)),
+};
 
-    let s = shell.clone();
-    sh.set(
-        "run",
-        lua.create_function(move |_, (cmd, opts): (Value, Option<Table>)| {
+taku_api::lua_api! {
+    pub fn register(global = "sh", backend: Shell as s) {
+        run => |_, (cmd, opts): (Value, Option<Table>)| {
             s.run(&parse_argv(cmd)?, &parse_opts(opts)?)
-        })?,
-    )?;
-
-    sh.set(
-        "capture",
-        lua.create_function(move |lua, (cmd, opts): (Value, Option<Table>)| {
-            capture_table(lua, shell.capture(&parse_argv(cmd)?, &parse_opts(opts)?)?)
-        })?,
-    )?;
-
-    lua.globals().set("sh", sh)?;
-    Ok(())
+        },
+        capture => |lua, (cmd, opts): (Value, Option<Table>)| {
+            capture_table(lua, s.capture(&parse_argv(cmd)?, &parse_opts(opts)?)?)
+        },
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -214,6 +241,25 @@ mod tests {
         run(r#"
             local r = sh.capture({ "false" })
             assert(r.code ~= 0, "false should exit non-zero")
+        "#);
+    }
+
+    #[test]
+    fn large_stdin_does_not_deadlock_capture() {
+        run(r#"
+            local big = string.rep("x", 1024 * 1024)
+            local r = sh.capture({ "cat" }, { stdin = big })
+            assert(r.code == 0, "exit " .. r.code)
+            assert(#r.stdout == #big, "got " .. #r.stdout .. " bytes")
+        "#);
+    }
+
+    #[test]
+    fn child_ignoring_stdin_is_not_an_error() {
+        run(r#"
+            local big = string.rep("x", 1024 * 1024)
+            local r = sh.capture({ "true" }, { stdin = big })
+            assert(r.code == 0, "exit " .. r.code)
         "#);
     }
 
