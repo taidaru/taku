@@ -7,10 +7,7 @@ pub fn init() {
 pub fn init() {}
 
 #[cfg(windows)]
-#[expect(
-    unsafe_code,
-    reason = "Win32 console FFI is inherently unsafe"
-)]
+#[expect(unsafe_code, reason = "Win32 console FFI is inherently unsafe")]
 mod windows {
     use std::ffi::c_void;
 
