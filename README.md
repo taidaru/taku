@@ -42,10 +42,10 @@ brew install taidaru/taku/taku
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/taidaru/taku/releases/latest/download/taku-installer.ps1 | iex"
 ```
 
-or [Scoop](https://scoop.sh) (the tap repo doubles as a bucket):
+or [Scoop](https://scoop.sh), from the [taidaru/scoop-taku](https://github.com/taidaru/scoop-taku) bucket:
 
 ```powershell
-scoop bucket add taku https://github.com/taidaru/homebrew-taku
+scoop bucket add taku https://github.com/taidaru/scoop-taku
 scoop install taku
 ```
 

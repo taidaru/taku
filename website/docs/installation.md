@@ -50,11 +50,11 @@ An `.msi` installer for each release is also available on the
 
 ## Windows (Scoop)
 
-The [taidaru/homebrew-taku](https://github.com/taidaru/homebrew-taku) repo also
-serves as a [Scoop](https://scoop.sh) bucket:
+Manifests are published to the [taidaru/scoop-taku](https://github.com/taidaru/scoop-taku)
+[Scoop](https://scoop.sh) bucket:
 
 ```powershell
-scoop bucket add taku https://github.com/taidaru/homebrew-taku
+scoop bucket add taku https://github.com/taidaru/scoop-taku
 scoop install taku
 ```
 
