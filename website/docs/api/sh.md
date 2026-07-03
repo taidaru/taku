@@ -5,7 +5,10 @@ depend on `bash`/`cmd`, and interpolated values can't be re-parsed (no injection
 
 ```lua
 sh.run({ "cargo", "build" })             -- streams stdio, returns exit code
-sh.run({ "git", "commit", "-m", msg })   -- msg needs no quoting
+
+local msg = 'release: "v1.0" (final)'
+sh.run({ "git", "commit", "-m", msg })   -- msg needs no quoting or escaping
+
 local r = sh.capture({ "git", "rev-parse", "HEAD" })
 print(r.code, r.stdout, r.stderr)
 ```
@@ -22,7 +25,7 @@ A bare string is rejected. For shell features (pipes, globs, redirects), run a
 shell yourself:
 
 ```lua
-sh.run({ "sh", "-c", "make && ./run | tee log" })
+sh.run({ "sh", "-c", "echo hello | tr a-z A-Z | tee log" })
 ```
 
 ## Options
@@ -30,7 +33,8 @@ sh.run({ "sh", "-c", "make && ./run | tee log" })
 The same `opts` apply to both `sh.run` and `sh.capture`:
 
 ```lua
-sh.run({ "make" }, {
+fs.mkdir("build")
+sh.run({ "sh", "-c", "echo $CC && pwd && cat" }, {
     cwd = "build",              -- working directory
     env = { CC = "clang" },     -- extra environment variables (added to the inherited env)
     stdin = "data on stdin",    -- fed to the command's stdin

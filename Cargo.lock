@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "taku"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "clap",
  "taku-runtime",
@@ -543,14 +543,14 @@ dependencies = [
 
 [[package]]
 name = "taku-api"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "mlua",
 ]
 
 [[package]]
 name = "taku-env"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "dotenvy",
  "mlua",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "taku-fs"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "mlua",
  "taku-api",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "taku-net"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "mlua",
  "taku-api",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "taku-runtime"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "mlua",
  "taku-api",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "taku-shell"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "mlua",
  "taku-api",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "taku-ssh"
-version = "0.1.2-alpha"
+version = "0.1.4-beta"
 dependencies = [
  "mlua",
  "taku-api",

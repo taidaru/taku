@@ -11,11 +11,18 @@ like. Tasks are written in **Lua** in a `Takufile.lua` at your project root.
   network, SSH) to Lua.
 - **Lua** is the user-facing layer: you compose those APIs into tasks.
 
-A Takefile runs in a [sandbox](./sandbox.md): Lua's own `io`/`os` are disabled, so
+A Takufile runs in a [sandbox](./sandbox.md): Lua's own `io`/`os` are disabled, so
 the only way to touch the system is through the provided `fs`/`sh`/`net`/`env`/
 `ssh` globals. Tasks declare dependencies, and independent ones run in parallel.
 
 ```lua
+task("gen", {
+    desc = "generate sources",
+    run = function()
+        fs.write("version.txt", "1.0.0\n")
+    end,
+})
+
 task("build", {
     desc = "compile the project",
     deps = { "gen" },

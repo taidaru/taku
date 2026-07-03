@@ -6,7 +6,10 @@
 
 ```lua
 sh.run({ "cargo", "build" })             -- стримит stdio, возвращает код выхода
-sh.run({ "git", "commit", "-m", msg })   -- msg не нужно экранировать
+
+local msg = 'release: "v1.0" (финал)'
+sh.run({ "git", "commit", "-m", msg })   -- msg не нужно квотить и экранировать
+
 local r = sh.capture({ "git", "rev-parse", "HEAD" })
 print(r.code, r.stdout, r.stderr)
 ```
@@ -23,7 +26,7 @@ print(r.code, r.stdout, r.stderr)
 перенаправления), запустите оболочку явно:
 
 ```lua
-sh.run({ "sh", "-c", "make && ./run | tee log" })
+sh.run({ "sh", "-c", "echo hello | tr a-z A-Z | tee log" })
 ```
 
 ## Опции
@@ -31,7 +34,8 @@ sh.run({ "sh", "-c", "make && ./run | tee log" })
 Одни и те же `opts` действуют и для `sh.run`, и для `sh.capture`:
 
 ```lua
-sh.run({ "make" }, {
+fs.mkdir("build")
+sh.run({ "sh", "-c", "echo $CC && pwd && cat" }, {
     cwd = "build",              -- рабочий каталог
     env = { CC = "clang" },     -- доп. переменные окружения (добавляются к унаследованным)
     stdin = "данные на stdin",  -- передаются команде на stdin

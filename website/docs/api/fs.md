@@ -18,6 +18,6 @@ for _, name in ipairs(fs.read_dir(".")) do print(name) end
 | `fs.remove(path)` | remove a file, or a directory recursively |
 | `fs.copy(src, dst)` | copy a file |
 | `fs.rename(src, dst)` | move / rename |
-| `fs.read_dir(path)` | list of entry names |
+| `fs.read_dir(path)` | list of entry names, sorted |
 
 Contents are byte strings, so binary files round-trip unchanged.

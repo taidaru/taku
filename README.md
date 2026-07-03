@@ -24,13 +24,26 @@ Full docs, in English & Russian: <https://taidaru.github.io/taku/> (sources in [
 
 ## Install
 
-**Linux & macOS** — download the latest release and install the binary:
+**Linux & macOS** — the installer downloads the latest release for your platform:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/taidaru/taku/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/latest/download/taku-installer.sh | sh
 ```
 
-**Windows** — the repo is a [Scoop](https://scoop.sh) bucket:
+**Homebrew** — the repo doubles as a tap:
+
+```sh
+brew tap taidaru/taku https://github.com/taidaru/taku
+brew install taku
+```
+
+**Windows** — via the installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/taidaru/taku/releases/latest/download/taku-installer.ps1 | iex"
+```
+
+or [Scoop](https://scoop.sh) (the repo is also a bucket):
 
 ```powershell
 scoop bucket add taku https://github.com/taidaru/taku
@@ -43,7 +56,7 @@ scoop install taku
 cargo install --path crates/taku
 ```
 
-You can also grab a prebuilt archive from the [GitHub releases](https://github.com/taidaru/taku/releases). Full details: [Installation docs](https://taidaru.github.io/taku/installation).
+Prebuilt archives and `.msi` installers are also on the [GitHub releases](https://github.com/taidaru/taku/releases) page. Full details: [Installation docs](https://taidaru.github.io/taku/installation).
 
 ## Example
 

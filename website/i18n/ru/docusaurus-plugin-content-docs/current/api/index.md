@@ -1,6 +1,6 @@
 # API
 
-Внутри Takefile доступны эти глобалы, плюс библиотеки Lua `string`, `table`,
+Внутри Takufile доступны эти глобалы, плюс библиотеки Lua `string`, `table`,
 `math`, `utf8` и `coroutine`:
 
 | Глобал | Назначение |

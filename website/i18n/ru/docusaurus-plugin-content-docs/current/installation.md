@@ -1,9 +1,9 @@
 # Установка
 
-Выберите способ под свою платформу. Готовые бинарники публикуются в каждом
-[релизе на GitHub](https://github.com/taidaru/taku/releases); для сборки из
-исходников нужны Rust-тулчейн и компилятор C (Lua компилируется из исходников
-через `mlua`).
+Выберите способ под свою платформу. Готовые бинарники и установщики
+публикуются в каждом [релизе на GitHub](https://github.com/taidaru/taku/releases);
+для сборки из исходников нужны Rust-тулчейн и компилятор C (Lua компилируется
+из исходников через `mlua`).
 
 ## Linux и macOS (скрипт установки)
 
@@ -11,21 +11,42 @@
 устанавливает бинарь `taku`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/taidaru/taku/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/latest/download/taku-installer.sh | sh
 ```
 
-Устанавливает в `~/.local/bin` (или в `/usr/local/bin`, если он доступен на
-запись и есть в `PATH`). Переопределяется переменными окружения:
+Устанавливает в `$CARGO_HOME/bin` (по умолчанию `~/.cargo/bin`) и обновляет
+профиль шелла, чтобы бинарь был в `PATH`. Чтобы установить в свой каталог:
 
 ```sh
-# установить конкретную версию
-TAKU_VERSION=v0.1.0-alpha.1 curl -fsSL https://raw.githubusercontent.com/taidaru/taku/main/install.sh | sh
-
-# установить в свой каталог
-TAKU_INSTALL_DIR=~/bin curl -fsSL https://raw.githubusercontent.com/taidaru/taku/main/install.sh | sh
+TAKU_INSTALL_DIR=~/bin curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/latest/download/taku-installer.sh | sh
 ```
 
-Если каталог установки не в `PATH`, скрипт подскажет, что добавить.
+Чтобы установить конкретную версию, возьмите установщик из соответствующего
+релиза вместо `latest`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/download/v0.1.4-beta/taku-installer.sh | sh
+```
+
+## Homebrew
+
+Репозиторий Taku одновременно является Homebrew-тапом:
+
+```sh
+brew tap taidaru/taku https://github.com/taidaru/taku
+brew install taku
+```
+
+## Windows (скрипт установки)
+
+Скачивает последний релиз и устанавливает бинарь `taku`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/taidaru/taku/releases/latest/download/taku-installer.ps1 | iex"
+```
+
+Для каждого релиза также доступен установщик `.msi` — на
+[странице релизов](https://github.com/taidaru/taku/releases).
 
 ## Windows (Scoop)
 
@@ -39,7 +60,7 @@ scoop install taku
 Обновление — `scoop update taku`. Чтобы поставить конкретную версию:
 
 ```powershell
-scoop install taku@0.1.0-alpha.1
+scoop install taku@0.1.2-alpha
 ```
 
 ## Из архива релиза
@@ -48,9 +69,18 @@ scoop install taku@0.1.0-alpha.1
 [страницы релизов](https://github.com/taidaru/taku/releases), распакуйте бинарь
 `taku` и добавьте его в `PATH`:
 
-- Linux: `taku-x86_64-unknown-linux-gnu.tar.gz`
-- macOS (Apple silicon): `taku-aarch64-apple-darwin.tar.gz`
-- Windows: `taku-x86_64-pc-windows-msvc.zip`
+- Linux: `taku-x86_64-unknown-linux-gnu.tar.xz` (есть также варианты `musl` и `aarch64`)
+- macOS: `taku-aarch64-apple-darwin.tar.xz` (Apple silicon) или `taku-x86_64-apple-darwin.tar.xz`
+- Windows: `taku-x86_64-pc-windows-msvc.zip` (есть также вариант `aarch64`)
+
+Для каждого архива публикуется файл контрольной суммы `.sha256`. Tar-архивы
+распаковываются в каталог `taku-<target>/`; zip-архивы — без каталога.
+
+## Обновление
+
+Установки через скрипты установки (и из архивов релиза) включают утилиту
+`taku-update` — запустите её, чтобы обновиться до последнего релиза. Установки
+через Homebrew и Scoop обновляются пакетным менеджером как обычно.
 
 ## Из исходников
 

@@ -121,7 +121,7 @@ taku run report                 # building in dev mode
 MODE=release taku run report    # ... and writes out/RELEASE
 ```
 
-A `.env` next to your `Takefile.lua` is loaded automatically, so `MODE` could
+A `.env` next to your `Takufile.lua` is loaded automatically, so `MODE` could
 instead live there (a real environment variable still overrides it):
 
 ```bash

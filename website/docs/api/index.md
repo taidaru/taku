@@ -1,6 +1,6 @@
 # API
 
-Inside a Takefile these globals are available, alongside Lua's `string`, `table`,
+Inside a Takufile these globals are available, alongside Lua's `string`, `table`,
 `math`, `utf8`, and `coroutine` libraries:
 
 | Global | Purpose |

@@ -12,6 +12,8 @@ local r = ssh.capture("deploy@host", { "hostname" })
 
 These mirror [`sh.run`/`sh.capture`](sh) — same argument list and the same
 `{ code, stdout, stderr }` result from `capture`, but executed on the remote host.
+(The one-off forms take no `opts` table; inside `ssh.on` the rerouted `sh`
+accepts the usual `cwd`/`env`/`stdin` options.)
 
 ## A whole block on the remote
 
@@ -19,6 +21,8 @@ Inside `ssh.on`, the ordinary `sh`/`fs`/`net`/`env` globals act on the **remote*
 host for the duration of the block, then are restored:
 
 ```lua
+local body = "[app]\nname = \"demo\"\n"
+
 ssh.on({ host = "host", user = "deploy" }, function()
     fs.write("/srv/app/config.toml", body)               -- remote file
     sh.run({ "systemctl", "--user", "restart", "app" })  -- remote command
@@ -37,7 +41,12 @@ A string `"[user@]host[:port]"`, or a table:
 
 Authentication uses your keys/agent by default. With `password`, it is handed to
 `ssh` via `SSH_ASKPASS` (never on the command line); the `known_hosts`
-confirmation prompt still goes to your terminal as usual.
+confirmation prompt still goes to your terminal as usual. In a headless run
+(no terminal) that first-contact prompt cannot be answered — pre-populate
+`known_hosts`, or pass e.g. `options = { "StrictHostKeyChecking=accept-new" }`.
+
+Consecutive operations on the same host share one connection (OpenSSH
+multiplexing, kept alive for 60 s; not available on Windows).
 
 :::note
 Remote `fs`/`env` run over coreutils (`cat`, `test`, `printenv`, ...); remote
