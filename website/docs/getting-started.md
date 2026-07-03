@@ -2,10 +2,10 @@
 
 ## Install
 
-See [Installation](installation.md) for all options (install script, Scoop,
-release archives, and building from source).
+See [Installation](installation.md) for all options (install scripts, Homebrew,
+Scoop, release archives, and building from source).
 
-## Create a Takefile
+## Create a Takufile
 
 ```sh
 taku init          # writes a starter Takufile.lua (won't overwrite an existing one)

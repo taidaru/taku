@@ -12,6 +12,8 @@ local r = ssh.capture("deploy@host", { "hostname" })
 
 Они повторяют [`sh.run`/`sh.capture`](sh) — тот же список аргументов и тот же
 результат `{ code, stdout, stderr }` у `capture`, но выполняются на удалённом хосте.
+(Разовые формы не принимают таблицу `opts`; внутри `ssh.on` перенаправленный `sh`
+принимает обычные опции `cwd`/`env`/`stdin`.)
 
 ## Целый блок на удалённой машине
 
@@ -19,6 +21,8 @@ local r = ssh.capture("deploy@host", { "hostname" })
 **удалённом** хосте, а затем восстанавливаются:
 
 ```lua
+local body = "[app]\nname = \"demo\"\n"
+
 ssh.on({ host = "host", user = "deploy" }, function()
     fs.write("/srv/app/config.toml", body)               -- файл на удалёнке
     sh.run({ "systemctl", "--user", "restart", "app" })  -- команда на удалёнке
@@ -37,7 +41,13 @@ end)
 
 По умолчанию аутентификация идёт через ключи/agent. С `password` пароль
 передаётся `ssh` через `SSH_ASKPASS` (никогда не в командной строке); запрос
-подтверждения `known_hosts` по-прежнему идёт в ваш терминал.
+подтверждения `known_hosts` по-прежнему идёт в ваш терминал. В headless-запуске
+(без терминала) на этот запрос первого подключения ответить нельзя — заранее
+заполните `known_hosts` или передайте, например,
+`options = { "StrictHostKeyChecking=accept-new" }`.
+
+Последовательные операции с одним хостом разделяют одно соединение
+(мультиплексирование OpenSSH, живёт 60 с; на Windows недоступно).
 
 :::note
 Удалённые `fs`/`env` работают через coreutils (`cat`, `test`, `printenv`, ...);

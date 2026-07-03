@@ -3,11 +3,25 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.2-alpha"
+authors = ["taidaru"]
+version = "0.1.4-beta"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/taidaru/taku"
+homepage = "https://taidaru.github.io/taku/"
+documentation = "https://taidaru.github.io/taku/"
+description = "A task runner powered by Rust and scripted in Lua."
+readme = "README.md"
+keywords = ["task-runner", "lua", "automation", "build", "sandbox"]
+categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.88"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+rust_2024_compatibility = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
 # Lua engine. `vendored` builds Lua from source (no system Lua needed)
@@ -28,3 +42,8 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "unwind"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

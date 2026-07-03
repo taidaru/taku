@@ -17,7 +17,16 @@
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "https://github.com/taidaru/taku/releases/download/v$version/taku-x86_64-pc-windows-msvc.zip"
+        "url": "https://github.com/taidaru/taku/releases/download/v$version/taku-x86_64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "$url.sha256"
+        }
+      },
+      "arm64": {
+        "url": "https://github.com/taidaru/taku/releases/download/v$version/taku-aarch64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "$url.sha256"
+        }
       }
     }
   }

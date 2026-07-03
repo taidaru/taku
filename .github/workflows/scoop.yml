@@ -1,0 +1,59 @@
+# Custom cargo-dist publish job ("./scoop" in dist-workspace.toml publish-jobs):
+# invoked from release.yml after the GitHub Release.
+# Updates the Scoop manifest (bucket/taku.json) on the default branch.
+name: publish-scoop
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  scoop:
+    name: scoop manifest
+    runs-on: ubuntu-latest
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      # The caller grants this job only id-token/packages permissions, so
+      # GITHUB_TOKEN cannot push; reuse the same PAT the homebrew publish job
+      # uses to push to this repo.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          persist-credentials: true
+
+      - name: Fetch built artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: artifacts-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Update manifest
+        run: |
+          version="$(jq -r '.releases[] | select(.app_name == "taku") | .app_version' <<<"$PLAN")"
+          tag="$(jq -r '.announcement_tag' <<<"$PLAN")"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
+          hash_x64="$(sha256sum artifacts/taku-x86_64-pc-windows-msvc.zip | cut -d' ' -f1)"
+          hash_arm64="$(sha256sum artifacts/taku-aarch64-pc-windows-msvc.zip | cut -d' ' -f1)"
+          jq --arg v "$version" \
+             --arg ux "$base/taku-x86_64-pc-windows-msvc.zip"   --arg hx "$hash_x64" \
+             --arg ua "$base/taku-aarch64-pc-windows-msvc.zip"  --arg ha "$hash_arm64" \
+             '.version = $v
+              | .architecture."64bit".url = $ux | .architecture."64bit".hash = $hx
+              | .architecture.arm64.url   = $ua | .architecture.arm64.hash   = $ha' \
+            bucket/taku.json > bucket/taku.json.tmp
+          mv bucket/taku.json.tmp bucket/taku.json
+
+      - name: Commit manifest
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bucket/taku.json
+          tag="$(jq -r '.announcement_tag' <<<"$PLAN")"
+          git diff --cached --quiet || git commit -m "scoop: update manifest to $tag"
+          git push

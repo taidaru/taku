@@ -11,10 +11,16 @@ end)
 -- spec table
 task("build", {
     desc = "compile the project",   -- optional; shown by `taku list`
-    deps = { "gen", "fmt" },        -- optional; run first
-    run = function() ... end,       -- required
+    deps = { "hello" },             -- optional; run first
+    run = function()                -- required, even with `deps`
+        print("building")
+    end,
 })
 ```
+
+The `run` function is **required** in the spec-table form — a spec table without
+one is an error. Defining the same task name twice prints a warning and the last
+definition wins.
 
 ## Dependencies
 
@@ -24,11 +30,14 @@ dependency is never repeated. Unknown tasks and dependency cycles are reported a
 errors before anything runs.
 
 ```lua
-task("gen",   { run = function() ... end })
-task("build", { deps = { "gen" }, run = function() ... end })
-task("test",  { deps = { "gen" }, run = function() ... end })
-task("ci",    { deps = { "build", "test" } })   -- `gen` still runs only once
+task("gen",   { run = function() print("gen") end })
+task("build", { deps = { "gen" }, run = function() print("build") end })
+task("test",  { deps = { "gen" }, run = function() print("test") end })
+task("ci",    { deps = { "build", "test" }, run = function() print("ci") end })
 ```
+
+`taku run ci` runs `gen` first (only once, although both `build` and `test`
+depend on it), then `build` and `test` in parallel, then `ci`.
 
 ## Parallelism
 
@@ -37,16 +46,23 @@ default; limit it with `taku run <task> -j N`. The first failure stops schedulin
 new tasks; work already in flight finishes.
 
 Each task body runs in its **own fresh sandbox** — there is no shared mutable Lua
-state between tasks, and top-level Takefile code runs once per executed task. Keep
+state between tasks, and top-level Takufile code runs once per executed task. Keep
 top-level code to task definitions.
 
 ## Imports
 
-Split a large Takefile across several files with `import`:
+Split a large Takufile across several files with `import`:
 
 ```lua
+-- Takufile.lua
 import("tasks/build.lua")
-import("tasks/deploy.lua")
+```
+
+```lua
+-- tasks/build.lua
+task("build", function()
+    print("building")
+end)
 ```
 
 - **Relative paths.** A path resolves against the directory of the file that calls

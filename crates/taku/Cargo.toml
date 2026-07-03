@@ -5,6 +5,22 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.wix]
+upgrade-guid = "035C83B3-C269-4752-A692-09A7CE47ACDC"
+path-guid = "41C354DA-1274-4150-B2D2-2F7D0FA537A3"
+license = false
+eula = false
 
 [[bin]]
 name = "taku"
