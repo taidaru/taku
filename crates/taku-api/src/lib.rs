@@ -21,6 +21,12 @@ pub struct RegisterCtx {
 
 pub type RegisterFn = fn(&mlua::Lua, &RegisterCtx) -> mlua::Result<()>;
 
+/// Context-prefixed external error — the shared `"<ctx>: <cause>"` shape every
+/// API backend reports failures in.
+pub fn ext<E: std::fmt::Display>(ctx: &str, e: E) -> mlua::Error {
+    mlua::Error::external(format!("{ctx}: {e}"))
+}
+
 /// One registrable API: the Lua global it installs and how to install it.
 #[derive(Clone, Copy)]
 pub struct ApiEntry {

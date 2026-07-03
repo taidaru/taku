@@ -5,13 +5,10 @@ use std::net::TcpStream;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use taku_api::ext;
 use ureq::Agent;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
-
-fn ext<E: std::fmt::Display>(ctx: &str, e: E) -> mlua::Error {
-    mlua::Error::external(format!("{ctx}: {e}"))
-}
 
 pub trait Net: Send + Sync {
     fn tcp_request(&self, host: &str, port: u16, data: &[u8]) -> mlua::Result<Vec<u8>>;

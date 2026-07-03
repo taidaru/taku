@@ -3,9 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-fn err<E: std::fmt::Display>(ctx: &str, e: E) -> mlua::Error {
-    mlua::Error::external(format!("{ctx}: {e}"))
-}
+use taku_api::ext;
 
 pub trait FileSystem: Send + Sync {
     fn read(&self, path: &str) -> mlua::Result<Vec<u8>>;
@@ -25,10 +23,10 @@ pub struct Local;
 
 impl FileSystem for Local {
     fn read(&self, path: &str) -> mlua::Result<Vec<u8>> {
-        fs::read(path).map_err(|e| err(&format!("fs.read({path})"), e))
+        fs::read(path).map_err(|e| ext(&format!("fs.read({path})"), e))
     }
     fn write(&self, path: &str, contents: &[u8]) -> mlua::Result<()> {
-        fs::write(path, contents).map_err(|e| err(&format!("fs.write({path})"), e))
+        fs::write(path, contents).map_err(|e| ext(&format!("fs.write({path})"), e))
     }
     fn append(&self, path: &str, contents: &[u8]) -> mlua::Result<()> {
         (|| {
@@ -38,7 +36,7 @@ impl FileSystem for Local {
                 .open(path)?;
             f.write_all(contents)
         })()
-        .map_err(|e| err(&format!("fs.append({path})"), e))
+        .map_err(|e| ext(&format!("fs.append({path})"), e))
     }
     fn exists(&self, path: &str) -> mlua::Result<bool> {
         Ok(Path::new(path).exists())
@@ -50,7 +48,7 @@ impl FileSystem for Local {
         Ok(Path::new(path).is_dir())
     }
     fn mkdir(&self, path: &str) -> mlua::Result<()> {
-        fs::create_dir_all(path).map_err(|e| err(&format!("fs.mkdir({path})"), e))
+        fs::create_dir_all(path).map_err(|e| ext(&format!("fs.mkdir({path})"), e))
     }
     fn remove(&self, path: &str) -> mlua::Result<()> {
         let p = Path::new(path);
@@ -60,21 +58,21 @@ impl FileSystem for Local {
             Ok(meta) if meta.is_dir() => fs::remove_dir_all(p),
             _ => fs::remove_file(p),
         };
-        res.map_err(|e| err(&format!("fs.remove({path})"), e))
+        res.map_err(|e| ext(&format!("fs.remove({path})"), e))
     }
     fn copy(&self, src: &str, dst: &str) -> mlua::Result<()> {
         fs::copy(src, dst)
             .map(|_| ())
-            .map_err(|e| err(&format!("fs.copy({src} -> {dst})"), e))
+            .map_err(|e| ext(&format!("fs.copy({src} -> {dst})"), e))
     }
     fn rename(&self, src: &str, dst: &str) -> mlua::Result<()> {
-        fs::rename(src, dst).map_err(|e| err(&format!("fs.rename({src} -> {dst})"), e))
+        fs::rename(src, dst).map_err(|e| ext(&format!("fs.rename({src} -> {dst})"), e))
     }
     fn read_dir(&self, path: &str) -> mlua::Result<Vec<String>> {
-        let entries = fs::read_dir(path).map_err(|e| err(&format!("fs.read_dir({path})"), e))?;
+        let entries = fs::read_dir(path).map_err(|e| ext(&format!("fs.read_dir({path})"), e))?;
         let mut names = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|e| err(&format!("fs.read_dir({path})"), e))?;
+            let entry = entry.map_err(|e| ext(&format!("fs.read_dir({path})"), e))?;
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
         // OS iteration order is arbitrary; sort for deterministic tasks.

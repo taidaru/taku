@@ -15,6 +15,12 @@ use taku_shell::{Opts, Shell, parse_argv};
 
 pub use util::ASKPASS_PASSWORD_ENV;
 
+/// The Lua globals `ssh.on` reroutes to the remote host. Exposed so the
+/// runtime can assert this list stays in sync with its API registry.
+pub fn remote_globals() -> impl Iterator<Item = &'static str> {
+    session::REMOTE_APIS.iter().map(|(name, _)| *name)
+}
+
 pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
     global: "ssh",
     register: |lua, ctx| register(lua, ctx.dotenv.clone()),
