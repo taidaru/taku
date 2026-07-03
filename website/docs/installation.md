@@ -26,7 +26,7 @@ To install a specific version, take the installer from that release instead of
 `latest`:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/download/v0.1.4-beta/taku-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/download/0.1.4/taku-installer.sh | sh
 ```
 
 ## Homebrew
