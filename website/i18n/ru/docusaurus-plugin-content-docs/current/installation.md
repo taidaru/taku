@@ -49,11 +49,11 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/taidaru/taku/relea
 
 ## Windows (Scoop)
 
-Репозиторий [taidaru/homebrew-taku](https://github.com/taidaru/homebrew-taku) 
-одновременно служит бакетом [Scoop](https://scoop.sh):
+Манифесты публикуются в бакет [Scoop](https://scoop.sh)
+[taidaru/scoop-taku](https://github.com/taidaru/scoop-taku):
 
 ```powershell
-scoop bucket add taku https://github.com/taidaru/homebrew-taku
+scoop bucket add taku https://github.com/taidaru/scoop-taku
 scoop install taku
 ```
 
