@@ -30,11 +30,10 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/d
 
 ## Homebrew
 
-Репозиторий Taku одновременно является Homebrew-тапом:
+Формулы публикуются в тапе [taidaru/homebrew-taku](https://github.com/taidaru/homebrew-taku):
 
 ```sh
-brew tap taidaru/taku https://github.com/taidaru/taku
-brew install taku
+brew install taidaru/taku/taku
 ```
 
 ## Windows (скрипт установки)
@@ -50,17 +49,18 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/taidaru/taku/relea
 
 ## Windows (Scoop)
 
-Репозиторий Taku сам является бакетом [Scoop](https://scoop.sh):
+Репозиторий [taidaru/homebrew-taku](https://github.com/taidaru/homebrew-taku) 
+одновременно служит бакетом [Scoop](https://scoop.sh):
 
 ```powershell
-scoop bucket add taku https://github.com/taidaru/taku
+scoop bucket add taku https://github.com/taidaru/homebrew-taku
 scoop install taku
 ```
 
 Обновление — `scoop update taku`. Чтобы поставить конкретную версию:
 
 ```powershell
-scoop install taku@0.1.2-alpha
+scoop install taku@0.1.4
 ```
 
 ## Из архива релиза

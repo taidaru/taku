@@ -30,11 +30,10 @@ Full docs, in English & Russian: <https://taidaru.github.io/taku/> (sources in [
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/latest/download/taku-installer.sh | sh
 ```
 
-**Homebrew** — the repo doubles as a tap:
+**Homebrew** — from the [taidaru/homebrew-taku](https://github.com/taidaru/homebrew-taku) tap:
 
 ```sh
-brew tap taidaru/taku https://github.com/taidaru/taku
-brew install taku
+brew install taidaru/taku/taku
 ```
 
 **Windows** — via the installer:
@@ -43,10 +42,10 @@ brew install taku
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/taidaru/taku/releases/latest/download/taku-installer.ps1 | iex"
 ```
 
-or [Scoop](https://scoop.sh) (the repo is also a bucket):
+or [Scoop](https://scoop.sh) (the tap repo doubles as a bucket):
 
 ```powershell
-scoop bucket add taku https://github.com/taidaru/taku
+scoop bucket add taku https://github.com/taidaru/homebrew-taku
 scoop install taku
 ```
 

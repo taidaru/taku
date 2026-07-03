@@ -31,11 +31,10 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taidaru/taku/releases/d
 
 ## Homebrew
 
-The Taku repository doubles as a Homebrew tap:
+Formulae are published to the [taidaru/homebrew-taku](https://github.com/taidaru/homebrew-taku) tap:
 
 ```sh
-brew tap taidaru/taku https://github.com/taidaru/taku
-brew install taku
+brew install taidaru/taku/taku
 ```
 
 ## Windows (install script)
@@ -51,17 +50,18 @@ An `.msi` installer for each release is also available on the
 
 ## Windows (Scoop)
 
-The Taku repository is itself a [Scoop](https://scoop.sh) bucket:
+The [taidaru/homebrew-taku](https://github.com/taidaru/homebrew-taku) repo also
+serves as a [Scoop](https://scoop.sh) bucket:
 
 ```powershell
-scoop bucket add taku https://github.com/taidaru/taku
+scoop bucket add taku https://github.com/taidaru/homebrew-taku
 scoop install taku
 ```
 
 Update later with `scoop update taku`. To pin a specific version:
 
 ```powershell
-scoop install taku@0.1.2-alpha
+scoop install taku@0.1.4
 ```
 
 ## From a release archive
