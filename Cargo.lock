@@ -584,7 +584,6 @@ dependencies = [
  "taku-fs",
  "taku-net",
  "taku-shell",
- "taku-ssh",
 ]
 
 [[package]]
@@ -593,18 +592,6 @@ version = "0.1.4"
 dependencies = [
  "mlua",
  "taku-api",
-]
-
-[[package]]
-name = "taku-ssh"
-version = "0.1.4"
-dependencies = [
- "mlua",
- "taku-api",
- "taku-env",
- "taku-fs",
- "taku-net",
- "taku-shell",
 ]
 
 [[package]]

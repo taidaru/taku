@@ -37,14 +37,6 @@ task("build", {
 fn main() -> ExitCode {
     console::init();
 
-    // When `ssh` needs a password and there is no tty, it runs this binary as its
-    // SSH_ASKPASS helper: `taku "<prompt>"`. Echo the password (passed out-of-band
-    // via a private env var, never argv) and exit before clap sees the prompt.
-    if let Some(password) = askpass_password() {
-        println!("{password}");
-        return ExitCode::SUCCESS;
-    }
-
     let cli = Cli::parse();
 
     match run(cli) {
@@ -54,21 +46,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Detects the askpass invocation strictly: the password env var alone must
-/// not hijack the CLI (a lingering `export TAKU_ASKPASS_PASSWORD=...` would
-/// make every `taku` run print the secret and exit). Only respond when ssh is
-/// really calling us as its helper: exactly one argument (the prompt) and
-/// SSH_ASKPASS naming this very binary.
-fn askpass_password() -> Option<String> {
-    let password = std::env::var(taku_runtime::ASKPASS_PASSWORD_ENV).ok()?;
-    if std::env::args_os().len() != 2 {
-        return None;
-    }
-    let helper = std::env::var_os("SSH_ASKPASS")?;
-    let me = std::env::current_exe().ok()?;
-    (Path::new(&helper) == me).then_some(password)
 }
 
 fn run(cli: Cli) -> Result<(), taku_runtime::Error> {

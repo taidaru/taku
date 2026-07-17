@@ -161,9 +161,7 @@ fn parse_opts(opts: Option<Table>) -> mlua::Result<Opts> {
             for pair in env.pairs::<String, String>() {
                 out.env.push(pair?);
             }
-            // Lua table order is arbitrary; sort so downstream consumers that
-            // serialize the env (the remote `env ...` line in taku-ssh) are
-            // deterministic.
+            // Lua table order is arbitrary; sort so the env is deterministic.
             out.env.sort();
         }
     }

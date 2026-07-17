@@ -14,8 +14,6 @@ use mlua::{Lua, Table};
 
 pub use error::Error;
 
-pub use taku_ssh::ASKPASS_PASSWORD_ENV;
-
 use state::{TASKS_KEY, build_state, find_takufile};
 
 pub struct Runtime {

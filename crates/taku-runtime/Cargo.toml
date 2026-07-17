@@ -18,4 +18,3 @@ taku-fs.workspace = true
 taku-shell.workspace = true
 taku-env.workspace = true
 taku-net.workspace = true
-taku-ssh.workspace = true
