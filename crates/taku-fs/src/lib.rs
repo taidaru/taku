@@ -2,7 +2,9 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use mlua::{Lua, Table};
 use taku_api::ext;
+use taku_api::steps::{Arg, StepCtx, StepDef};
 
 pub fn read(path: &str) -> mlua::Result<Vec<u8>> {
     fs::read(path).map_err(|e| ext(&format!("fs.read({path})"), e))
@@ -72,7 +74,65 @@ pub fn glob(pattern: &str) -> mlua::Result<Vec<String>> {
     Ok(out)
 }
 
-pub fn register(lua: &mlua::Lua) -> mlua::Result<()> {
+/// `{ src|[1], to = ... }` with both sides formatted.
+fn src_to(t: &Table, ctx: &StepCtx) -> mlua::Result<(String, String)> {
+    let src = ctx.fmt_field_or_first(t, "src")?;
+    let to = ctx.fmt_value(t.get("to")?)?;
+    Ok((src, to))
+}
+
+pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
+    globals: &["fs"],
+    register: |lua, _ctx| register(lua),
+    steps: &[
+        StepDef {
+            tag: "rm",
+            arg: Arg::Str,
+            run: |_, t, ctx| rm(&ctx.fmt_value(t.get(1)?)?),
+        },
+        StepDef {
+            tag: "mkdir",
+            arg: Arg::Str,
+            run: |_, t, ctx| mkdir(&ctx.fmt_value(t.get(1)?)?),
+        },
+        StepDef {
+            tag: "cp",
+            arg: Arg::Table,
+            run: |_, t, ctx| {
+                let (src, to) = src_to(t, ctx)?;
+                cp(&src, &to)
+            },
+        },
+        StepDef {
+            tag: "mv",
+            arg: Arg::Table,
+            run: |_, t, ctx| {
+                let (src, to) = src_to(t, ctx)?;
+                mv(&src, &to)
+            },
+        },
+        StepDef {
+            tag: "write",
+            arg: Arg::Table,
+            run: |_, t, ctx| {
+                let data = ctx.fmt_field_or_first(t, "data")?;
+                let to = ctx.fmt_value(t.get("to")?)?;
+                write(&to, data.as_bytes())
+            },
+        },
+        StepDef {
+            tag: "append",
+            arg: Arg::Table,
+            run: |_, t, ctx| {
+                let line = ctx.fmt_field_or_first(t, "line")?;
+                let to = ctx.fmt_value(t.get("to")?)?;
+                append(&to, format!("{line}\n").as_bytes())
+            },
+        },
+    ],
+};
+
+pub fn register(lua: &Lua) -> mlua::Result<()> {
     taku_api::lua_api!(lua, global = "fs" {
         read => |lua, path: String| lua.create_string(read(&path)?),
         write => |_, (path, contents): (String, mlua::String)| {

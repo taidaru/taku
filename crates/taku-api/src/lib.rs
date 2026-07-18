@@ -1,4 +1,31 @@
-//! Shared plumbing for taku's Lua API crates.
+//! Registration contracts for taku's Lua APIs.
+
+pub mod steps;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Shared registration inputs, constructed once per Lua state by the runtime.
+pub struct RegisterCtx {
+    /// The parsed project `.env`.
+    pub dotenv: Arc<HashMap<String, String>>,
+    /// Directory of the Takufile (for path-resolving builtins like `import`).
+    pub base: PathBuf,
+    /// Whether this state should print load-time warnings (planner state
+    /// only; worker states stay quiet).
+    pub warnings: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct ApiEntry {
+    /// Globals `register` installs (for the runtime's sandbox test).
+    pub globals: &'static [&'static str],
+    pub register: fn(&mlua::Lua, &RegisterCtx) -> mlua::Result<()>,
+    /// Data-steps this API executes; the runtime registers their bare-verb
+    /// constructors and dispatches on the step tag.
+    pub steps: &'static [steps::StepDef],
+}
 
 /// Context-prefixed external error — the shared `"<ctx>: <cause>"` shape every
 /// API reports failures in.

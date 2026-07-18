@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use mlua::{Function, Table};
+use mlua::Table;
 
 use crate::error::Error;
 use crate::plan::Plan;
@@ -19,6 +19,7 @@ pub(crate) fn execute(
     source: &str,
     plan: &Plan,
     jobs: Option<NonZeroUsize>,
+    apis: &'static [taku_api::ApiEntry],
 ) -> Result<usize, Error> {
     let mut indegree: HashMap<&str, usize> = plan
         .deps
@@ -62,7 +63,7 @@ pub(crate) fn execute(
                 let name = name.to_string();
                 scope.spawn(move || {
                     let start = Instant::now();
-                    let res = run_task(path, source, &name, &worker_style);
+                    let res = run_task(path, source, &name, &worker_style, apis);
                     let _ = tx.send((name, res, start.elapsed()));
                 });
                 running += 1;
@@ -109,8 +110,14 @@ pub(crate) fn execute(
     }
 }
 
-fn run_task(path: &Path, source: &str, name: &str, style: &Style) -> Result<(), String> {
-    let body = AssertUnwindSafe(|| run_task_body(path, source, name));
+fn run_task(
+    path: &Path,
+    source: &str,
+    name: &str,
+    style: &Style,
+    apis: &'static [taku_api::ApiEntry],
+) -> Result<(), String> {
+    let body = AssertUnwindSafe(|| run_task_body(path, source, name, apis));
     match catch_unwind(body) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(Error::Lua(e))) => Err(format!(
@@ -135,8 +142,13 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
-fn run_task_body(path: &Path, source: &str, name: &str) -> Result<(), Error> {
-    let lua = build_state(path, source, false)?;
+fn run_task_body(
+    path: &Path,
+    source: &str,
+    name: &str,
+    apis: &'static [taku_api::ApiEntry],
+) -> Result<(), Error> {
+    let (lua, dotenv) = build_state(path, source, false, apis)?;
     let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
     let spec: Table = tasks
         .get::<Option<Table>>(name)?
@@ -145,14 +157,16 @@ fn run_task_body(path: &Path, source: &str, name: &str) -> Result<(), Error> {
             takufile: path.to_path_buf(),
             available: Vec::new(),
         })?;
-    let run: Function = spec.get("run")?;
+    let mut ctx = crate::exec::Ctx {
+        dotenv,
+        vars: crate::exec::initial_vars(&spec)?,
+    };
     // Effects (`cmd.*`, fs writes, `net.*`) are gated on the runtime phase;
-    // only the task body — never top-level Takufile code — may perform them.
+    // only step execution — never top-level Takufile code — may perform them.
     taku_api::set_runtime(true);
-    let result = run.call::<()>(());
+    let result = crate::exec::run_steps(&lua, apis, &spec, &mut ctx);
     taku_api::set_runtime(false);
-    result?;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -167,16 +181,50 @@ mod tests {
         let sub = dir.join("made-by-task").display().to_string();
 
         let top_level = format!("fs.mkdir('{sub}')");
-        let err = build_state(&path, &top_level, false).unwrap_err();
+        let err = build_state(&path, &top_level, false, crate::test_apis()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("only available while a task is running"),
             "got: {err}"
         );
 
-        let source = format!("task('t', function() fs.mkdir('{sub}') end)");
-        run_task_body(&path, &source, "t").unwrap();
+        let source = format!("task('t', {{ function() fs.mkdir('{sub}') end }})");
+        run_task_body(&path, &source, "t", crate::test_apis()).unwrap();
         assert!(std::path::Path::new(&sub).is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn data_steps_execute_and_deps_come_from_the_header() {
+        let dir = std::env::temp_dir().join(format!("taku-steps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Takufile.lua");
+        let d = dir.display();
+
+        let source = format!(
+            r#"
+--- writes and rearranges files
+task("files <name=greeting>", {{
+    mkdir "{d}/out",
+    write {{ "hello ${{name}}", to = "{d}/out/a.txt" }},
+    cp {{ "{d}/out/a.txt", to = "{d}/out/b.txt" }},
+    append {{ "more", to = "{d}/out/b.txt" }},
+    "touch {d}/out/via-command",
+    rm "{d}/out/a.txt",
+}})
+
+task("all: files", {{}})
+"#
+        );
+        let (lua, _env) = build_state(&path, &source, false, crate::test_apis()).unwrap();
+        let plan = crate::plan::build(&lua, &path, "all").unwrap();
+        assert_eq!(plan.deps["all"], ["files"]);
+
+        run_task_body(&path, &source, "files", crate::test_apis()).unwrap();
+        let b = std::fs::read_to_string(dir.join("out/b.txt")).unwrap();
+        assert_eq!(b, "hello greetingmore\n");
+        assert!(dir.join("out/via-command").is_file());
+        assert!(!dir.join("out/a.txt").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

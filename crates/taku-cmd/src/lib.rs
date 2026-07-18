@@ -1,14 +1,18 @@
 use std::fmt::Display;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use mlua::{Lua, Table, Value};
+use taku_api::steps::{Arg, StepCtx, StepDef};
 
 #[derive(Default)]
 pub struct Opts {
     pub stdin: Option<Vec<u8>>,
     pub cwd: Option<String>,
     pub env: Vec<(String, String)>,
+    /// Kill the child and error once this elapses.
+    pub timeout: Option<Duration>,
 }
 
 pub struct Capture {
@@ -17,7 +21,7 @@ pub struct Capture {
     pub stderr: Vec<u8>,
 }
 
-fn command(argv: &[String], opts: &Opts) -> Command {
+pub fn command(argv: &[String], opts: &Opts) -> Command {
     // Callers must pass a non-empty argv (enforced at the Lua boundary by
     // `parse_argv`).
     debug_assert!(!argv.is_empty(), "argv must be non-empty");
@@ -81,14 +85,102 @@ pub fn wait_status_with_input(mut child: Child, data: Option<&[u8]>) -> io::Resu
     })
 }
 
+/// full pipe can't block the wait.
+fn spawn_reader<'scope, R: Read + Send + 'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    reader: Option<R>,
+) -> Option<std::thread::ScopedJoinHandle<'scope, io::Result<Vec<u8>>>> {
+    let mut reader = reader?;
+    Some(scope.spawn(move || {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        Ok(buf)
+    }))
+}
+
+/// TODO!
+fn wait_deadline(
+    child: &mut Child,
+    deadline: Instant,
+    timeout: Duration,
+) -> io::Result<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("timed out after {}s", timeout.as_secs_f64()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_status_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+    data: Option<&[u8]>,
+) -> io::Result<ExitStatus> {
+    let stdin = child.stdin.take();
+    let deadline = Instant::now() + timeout;
+    std::thread::scope(|scope| {
+        let feeder = spawn_feeder(scope, stdin, data);
+        finish(wait_deadline(&mut child, deadline, timeout), feeder)
+    })
+}
+
+fn wait_output_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+    data: Option<&[u8]>,
+) -> io::Result<Output> {
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let deadline = Instant::now() + timeout;
+    std::thread::scope(|scope| {
+        let feeder = spawn_feeder(scope, stdin, data);
+        let out_h = spawn_reader(scope, stdout);
+        let err_h = spawn_reader(scope, stderr);
+        let status = wait_deadline(&mut child, deadline, timeout)?;
+        let stdout = out_h.map_or(Ok(Vec::new()), |h| {
+            h.join().expect("stdout reader panicked")
+        })?;
+        let stderr = err_h.map_or(Ok(Vec::new()), |h| {
+            h.join().expect("stderr reader panicked")
+        })?;
+        finish(Ok(()), feeder)?;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+}
+
 pub fn run(argv: &[String], opts: &Opts) -> mlua::Result<i32> {
+    // `cmd.run` takes a literal argv, so echoing it back is safe.
+    run_ctx(argv, opts, &format!("cmd.run({})", argv.join(" ")))
+}
+
+/// Steps resolve their argv from `${...}` placeholders that may carry secrets, so
+/// they pass a redacted label here rather than leaking the resolved command.
+fn run_ctx(argv: &[String], opts: &Opts, ctx: &str) -> mlua::Result<i32> {
     let mut command = command(argv, opts);
     if opts.stdin.is_some() {
         command.stdin(Stdio::piped());
     }
-    let child = command.spawn().map_err(|e| err("run", argv, e))?;
-    let status =
-        wait_status_with_input(child, opts.stdin.as_deref()).map_err(|e| err("run", argv, e))?;
+    let mkerr = |e: io::Error| mlua::Error::external(format!("{ctx}: {e}"));
+    let child = command.spawn().map_err(mkerr)?;
+    let status = match opts.timeout {
+        Some(timeout) => wait_status_with_timeout(child, timeout, opts.stdin.as_deref()),
+        None => wait_status_with_input(child, opts.stdin.as_deref()),
+    }
+    .map_err(mkerr)?;
     Ok(status.code().unwrap_or(-1))
 }
 
@@ -101,7 +193,11 @@ pub fn capture(argv: &[String], opts: &Opts) -> mlua::Result<Capture> {
         Stdio::null()
     });
     let child = command.spawn().map_err(|e| err("capture", argv, e))?;
-    let out = wait_with_input(child, opts.stdin.as_deref()).map_err(|e| err("capture", argv, e))?;
+    let out = match opts.timeout {
+        Some(timeout) => wait_output_with_timeout(child, timeout, opts.stdin.as_deref()),
+        None => wait_with_input(child, opts.stdin.as_deref()),
+    }
+    .map_err(|e| err("capture", argv, e))?;
     Ok(Capture {
         code: out.status.code().unwrap_or(-1),
         stdout: out.stdout,
@@ -137,6 +233,16 @@ pub fn parse_argv(value: Value) -> mlua::Result<Vec<String>> {
     }
 }
 
+fn parse_timeout(secs: Option<f64>) -> mlua::Result<Option<Duration>> {
+    match secs {
+        None => Ok(None),
+        Some(s) if !s.is_finite() || s < 0.0 => Err(mlua::Error::external(format!(
+            "timeout must be a non-negative number of seconds, got {s}"
+        ))),
+        Some(s) => Ok(Some(Duration::from_secs_f64(s))),
+    }
+}
+
 fn parse_opts(opts: Option<Table>) -> mlua::Result<Opts> {
     let mut out = Opts::default();
     if let Some(t) = opts {
@@ -148,12 +254,183 @@ fn parse_opts(opts: Option<Table>) -> mlua::Result<Opts> {
             for pair in env.pairs::<String, String>() {
                 out.env.push(pair?);
             }
-            // Lua table order is arbitrary; sort so the env is deterministic.
+            // sort, so the env is deterministic.
             out.env.sort();
         }
+        out.timeout = parse_timeout(t.get::<Option<f64>>("timeout")?)?;
     }
     Ok(out)
 }
+
+/// Options shared by the `cmd`/`argv`/`pipe` steps: `cwd`, `env = {...}`,
+/// `allow_fail`, `timeout` (seconds)
+fn step_opts(t: Option<&Table>, ctx: &StepCtx) -> mlua::Result<(Opts, bool)> {
+    // The child inherits the process env; `.env` only fills what the real
+    // environment leaves unset (same precedence as `env.get`), so a `.env`
+    // entry never silently overrides an inherited var like PATH.
+    let mut env: Vec<(String, String)> = ctx
+        .dotenv
+        .iter()
+        .filter(|(k, _)| std::env::var_os(k).is_none())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    env.sort();
+    let mut opts = Opts {
+        env,
+        ..Opts::default()
+    };
+    let mut allow_fail = false;
+    if let Some(t) = t {
+        if let Some(cwd) = t.get::<Option<String>>("cwd")? {
+            opts.cwd = Some(ctx.fmt(&cwd)?);
+        }
+        if let Some(step_env) = t.get::<Option<Table>>("env")? {
+            let mut extra = Vec::new();
+            for pair in step_env.pairs::<String, Value>() {
+                let (k, v) = pair?;
+                extra.push((k, ctx.fmt_value(v)?));
+            }
+            extra.sort();
+            opts.env.extend(extra);
+        }
+        allow_fail = t.get::<Option<bool>>("allow_fail")?.unwrap_or(false);
+        opts.timeout = parse_timeout(t.get::<Option<f64>>("timeout")?)?;
+    }
+    Ok((opts, allow_fail))
+}
+
+fn tokenize(line: &str, template: &str) -> mlua::Result<Vec<String>> {
+    let argv = shlex::split(line).ok_or_else(|| {
+        mlua::Error::external(format!("unbalanced quotes in command: {template}"))
+    })?;
+    if argv.is_empty() {
+        return Err(mlua::Error::external(format!("empty command: {template}")));
+    }
+    Ok(argv)
+}
+
+/// format the template, tokenize, run. A non-zero exit fails the step unless
+/// `allow_fail`; the error names the template, never the resolved argv —
+/// resolved env values may hold secrets.
+fn cmd_step(t: &Table, ctx: &mut StepCtx) -> mlua::Result<()> {
+    let template: String = t.get(1)?;
+    let (opts, allow_fail) = step_opts(Some(t), ctx)?;
+    let argv = tokenize(&ctx.fmt(&template)?, &template)?;
+    let code = run_ctx(&argv, &opts, &format!("command: {template}"))?;
+    if code != 0 && !allow_fail {
+        return Err(mlua::Error::external(format!(
+            "command failed (exit {code}): {template}"
+        )));
+    }
+    Ok(())
+}
+
+/// `argv{ "prog", "arg with spaces", ... }` — elements are formatted
+/// individually and never re-tokenized.
+fn argv_step(t: &Table, ctx: &mut StepCtx) -> mlua::Result<()> {
+    let (opts, allow_fail) = step_opts(Some(t), ctx)?;
+    let mut argv = Vec::new();
+    for v in t.sequence_values::<Value>() {
+        argv.push(ctx.fmt_value(v?)?);
+    }
+    if argv.is_empty() {
+        return Err(mlua::Error::external("argv{}: empty argument list"));
+    }
+    let code = run_ctx(&argv, &opts, "argv command")?;
+    if code != 0 && !allow_fail {
+        return Err(mlua::Error::external(format!(
+            "command failed (exit {code})"
+        )));
+    }
+    Ok(())
+}
+
+/// Kills and reaps any still-running children when the pipeline errors early
+/// (a mid-spawn failure or a timeout) — `Child`'s own Drop is a no-op on Unix,
+/// so without this an unfinished stage would be orphaned for the process life.
+struct KillOnDrop<'a>(Vec<(&'a String, Child)>);
+
+impl Drop for KillOnDrop<'_> {
+    fn drop(&mut self) {
+        for (_, child) in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// `pipe{ "cmd1", "cmd2", ... }` — a Rust-managed pipeline; pipefail always.
+fn pipe_step(t: &Table, ctx: &mut StepCtx) -> mlua::Result<()> {
+    let (opts, allow_fail) = step_opts(Some(t), ctx)?;
+    let mut templates = Vec::new();
+    for v in t.sequence_values::<String>() {
+        templates.push(v?);
+    }
+    if templates.is_empty() {
+        return Err(mlua::Error::external("pipe{}: no commands"));
+    }
+
+    let mut children = KillOnDrop(Vec::new());
+    let mut prev_stdout = None;
+    for (i, template) in templates.iter().enumerate() {
+        let argv = tokenize(&ctx.fmt(template)?, template)?;
+        let mut cmd = command(&argv, &opts);
+        if let Some(out) = prev_stdout.take() {
+            cmd.stdin(Stdio::from(out));
+        }
+        if i + 1 < templates.len() {
+            cmd.stdout(Stdio::piped());
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| mlua::Error::external(format!("{template}: {e}")))?;
+        prev_stdout = child.stdout.take();
+        children.0.push((template, child));
+    }
+
+    // One deadline for the whole pipeline (not per stage).
+    let deadline = opts.timeout.map(|t| Instant::now() + t);
+    let mut failed = None;
+    for (template, child) in &mut children.0 {
+        let status = match (deadline, opts.timeout) {
+            (Some(deadline), Some(timeout)) => wait_deadline(child, deadline, timeout),
+            _ => child.wait(),
+        }
+        .map_err(|e| mlua::Error::external(format!("{template}: {e}")))?;
+        if !status.success() && failed.is_none() {
+            failed = Some(format!(
+                "pipeline command failed (exit {}): {template}",
+                status.code().unwrap_or(-1)
+            ));
+        }
+    }
+    match failed {
+        Some(msg) if !allow_fail => Err(mlua::Error::external(msg)),
+        _ => Ok(()),
+    }
+}
+
+pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
+    globals: &["cmd"],
+    register: |lua, _ctx| register(lua),
+    steps: &[
+        StepDef {
+            tag: "cmd",
+            arg: Arg::Hidden,
+            run: |_, t, ctx| cmd_step(t, ctx),
+        },
+        StepDef {
+            tag: "argv",
+            arg: Arg::Table,
+            run: |_, t, ctx| argv_step(t, ctx),
+        },
+        StepDef {
+            tag: "pipe",
+            arg: Arg::Table,
+            run: |_, t, ctx| pipe_step(t, ctx),
+        },
+    ],
+};
 
 pub fn register(lua: &Lua) -> mlua::Result<()> {
     taku_api::lua_api!(lua, global = "cmd" {
@@ -286,6 +563,38 @@ mod tests {
             local r = cmd.capture({ "true" }, { stdin = big })
             assert(r.code == 0, "exit " .. r.code)
         "#);
+    }
+
+    #[test]
+    fn timeout_kills_a_slow_command() {
+        let start = std::time::Instant::now();
+        let err = lua()
+            .load(r#"cmd.run({ "sleep", "30" }, { timeout = 0.2 })"#)
+            .exec()
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "did not stop near the deadline"
+        );
+    }
+
+    #[test]
+    fn stdin_and_timeout_together_do_not_deadlock() {
+        run(r#"
+            local r = cmd.capture({ "cat" }, { stdin = "hi", timeout = 5 })
+            assert(r.code == 0, "exit " .. r.code)
+            assert(r.stdout == "hi", "got: " .. r.stdout)
+        "#);
+    }
+
+    #[test]
+    fn timeout_rejects_negative() {
+        let err = lua()
+            .load(r#"cmd.try({ "true" }, { timeout = -1 })"#)
+            .exec()
+            .unwrap_err();
+        assert!(err.to_string().contains("non-negative"), "got: {err}");
     }
 
     #[test]

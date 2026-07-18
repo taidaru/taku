@@ -14,7 +14,11 @@ workspace = true
 [dependencies]
 mlua.workspace = true
 taku-api.workspace = true
+dotenvy = "0.15"
+
+[dev-dependencies]
 taku-fs.workspace = true
 taku-cmd.workspace = true
-taku-env.workspace = true
 taku-net.workspace = true
+taku-env.workspace = true
+taku-ops.workspace = true

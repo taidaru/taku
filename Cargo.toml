@@ -33,6 +33,7 @@ taku-api = { path = "crates/taku-api" }
 taku-fs = { path = "crates/taku-fs" }
 taku-net = { path = "crates/taku-net" }
 taku-cmd = { path = "crates/taku-cmd" }
+taku-ops = { path = "crates/taku-ops" }
 taku-env = { path = "crates/taku-env" }
 
 [profile.release]

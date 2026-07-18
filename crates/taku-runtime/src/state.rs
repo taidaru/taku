@@ -6,18 +6,76 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value};
+use mlua::{Lua, LuaOptions, StdLib, Table, Value};
+use taku_api::steps::{Arg, StepDef, TAG};
+use taku_api::{ApiEntry, RegisterCtx};
 
 use crate::error::Error;
 
 pub(crate) const TAKUFILE: &str = "Takufile.lua";
 
 pub(crate) const TASKS_KEY: &str = "taku.tasks";
+pub(crate) const DOCS_KEY: &str = "taku.docs";
+
+/// The runtime's own builtins, declared in the same [`ApiEntry`] shape as
+/// every other API crate. `invoke`/`serve`/`unchanged` are task-level steps
+/// the executor interprets itself, so their handlers are stubs.
+pub(crate) const RUNTIME_API: ApiEntry = ApiEntry {
+    globals: &["task", "import", "fmt", "raw"],
+    register: register_builtins,
+    steps: &[
+        StepDef {
+            tag: "invoke",
+            arg: Arg::Custom(|lua, tag| {
+                lua.create_function(move |lua, (name, vars): (String, Option<Table>)| {
+                    let t = lua.create_table()?;
+                    t.set(TAG, tag)?;
+                    t.set(1, name)?;
+                    if let Some(vars) = vars {
+                        t.set("vars", vars)?;
+                    }
+                    Ok(t)
+                })
+            }),
+            run: |_, _, _| Err(mlua::Error::external("invoke is handled by the runtime")),
+        },
+        StepDef {
+            tag: "serve",
+            arg: Arg::Table,
+            run: |_, _, _| {
+                Err(mlua::Error::external(
+                    "'serve' steps are not implemented yet",
+                ))
+            },
+        },
+        StepDef {
+            tag: "unchanged",
+            arg: Arg::Table,
+            run: |_, _, _| {
+                Err(mlua::Error::external(
+                    "'unchanged' steps are not implemented yet",
+                ))
+            },
+        },
+    ],
+};
+
+pub(crate) fn all_apis(
+    apis: &'static [ApiEntry],
+) -> impl Iterator<Item = &'static ApiEntry> + Clone {
+    std::iter::once(&RUNTIME_API).chain(apis.iter())
+}
 
 /// Builds the canonical Lua state. `warnings` is set only for the state the
 /// planner loads: workers rebuild the same state per task, and re-printing
-/// every warning once per task would be noise.
-pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<Lua, Error> {
+/// every warning once per task would be noise. The parsed `.env` map is
+/// returned alongside for the step executor.
+pub(crate) fn build_state(
+    path: &Path,
+    source: &str,
+    warnings: bool,
+    apis: &'static [ApiEntry],
+) -> Result<(Lua, Arc<HashMap<String, String>>), Error> {
     let lua = new_sandboxed()?;
     let base = path
         .parent()
@@ -27,7 +85,7 @@ pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<L
     // A missing `.env` yields an empty map; an unreadable or malformed one is
     // an error — silently running without the intended variables is worse.
     let dotenv = Arc::new(match fs::read_to_string(base.join(".env")) {
-        Ok(contents) => taku_env::parse_dotenv(&contents)?,
+        Ok(contents) => crate::dotenv::parse(&contents)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
         Err(e) => {
             return Err(Error::Io(std::io::Error::new(
@@ -37,24 +95,29 @@ pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<L
         }
     });
 
-    register_import(&lua, base)?;
-    register_task(&lua, warnings)?;
-    register_builtins(&lua, dotenv.clone())?;
+    let ctx = RegisterCtx {
+        dotenv: dotenv.clone(),
+        base,
+        warnings,
+    };
+    for api in all_apis(apis) {
+        (api.register)(&lua, &ctx)?;
+        taku_api::steps::register_constructors(&lua, api.steps)?;
+    }
 
-    taku_fs::register(&lua)?;
-    taku_cmd::register(&lua)?;
-    taku_net::register(&lua)?;
-    taku_env::register(&lua, dotenv)?;
-
+    store_docs(&lua, source)?;
     lua.load(source)
         .set_name(format!("@{}", path.to_string_lossy()))
         .exec()?;
-    Ok(lua)
+    Ok((lua, dotenv))
 }
 
-/// `raw()` and `fmt()` — the placeholder-formatter builtins.
-fn register_builtins(lua: &Lua, dotenv: Arc<HashMap<String, String>>) -> Result<(), Error> {
-    // raw("..."): a value the executor passes through without formatting.
+/// `task`, `import`, and the formatter builtins `fmt`/`raw`.
+fn register_builtins(lua: &Lua, ctx: &RegisterCtx) -> mlua::Result<()> {
+    register_task(lua, ctx.warnings)?;
+    register_import(lua, ctx.base.clone())?;
+
+    // raw("..."): a value the step executor passes through without formatting.
     let raw = lua.create_function(|lua, s: mlua::String| {
         let t = lua.create_table()?;
         t.set("__raw", s)?;
@@ -64,13 +127,31 @@ fn register_builtins(lua: &Lua, dotenv: Arc<HashMap<String, String>>) -> Result<
 
     // fmt("..."): manual formatting inside function-steps.
     // task vars are wired in with ctx later; env/.env works already.
+    let dotenv = ctx.dotenv.clone();
     let fmt = lua.create_function(move |_, template: String| {
-        crate::fmtstr::format(&template, &HashMap::new(), &|name| {
-            taku_env::get(&dotenv, name)
-        })
-        .map_err(|e| mlua::Error::external(format!("fmt: {e}")))
+        crate::exec::format_step(&template, &HashMap::new(), &dotenv)
+            .map_err(|e| mlua::Error::external(format!("fmt: {e}")))
     })?;
     lua.globals().set("fmt", fmt)?;
+    Ok(())
+}
+
+/// Scans `source` for `---` doc blocks and merges them into the docs registry
+/// table, so `task()` can attach a doc to its spec when it runs.
+fn store_docs(lua: &Lua, source: &str) -> mlua::Result<()> {
+    let docs: Table = match lua.named_registry_value(DOCS_KEY) {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.create_table()?;
+            lua.set_named_registry_value(DOCS_KEY, &t)?;
+            t
+        }
+    };
+    let mut found = HashMap::new();
+    crate::taskdef::scan_docs(source, &mut found);
+    for (name, doc) in found {
+        docs.set(name, doc)?;
+    }
     Ok(())
 }
 
@@ -91,7 +172,7 @@ struct ImportState {
     imported: HashSet<PathBuf>,
 }
 
-fn register_import(lua: &Lua, base_dir: PathBuf) -> Result<(), Error> {
+fn register_import(lua: &Lua, base_dir: PathBuf) -> mlua::Result<()> {
     let state = Rc::new(RefCell::new(ImportState {
         dir_stack: vec![base_dir],
         imported: HashSet::new(),
@@ -119,6 +200,8 @@ fn register_import(lua: &Lua, base_dir: PathBuf) -> Result<(), Error> {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| current.clone());
 
+        // docs first, so `task()` calls in the imported file can find theirs
+        store_docs(lua, &source)?;
         state.borrow_mut().dir_stack.push(dir);
         let result = lua
             .load(&source)
@@ -131,48 +214,41 @@ fn register_import(lua: &Lua, base_dir: PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-fn register_task(lua: &Lua, warnings: bool) -> Result<(), Error> {
+/// `task("name <param=default>: dep1 dep2", { steps... })` — the second
+/// argument is always a table of steps
+fn register_task(lua: &Lua, warnings: bool) -> mlua::Result<()> {
     let tasks = lua.create_table()?;
     lua.set_named_registry_value(TASKS_KEY, &tasks)?;
 
-    let task = lua.create_function(move |lua, (name, def): (String, Value)| {
-        let spec = lua.create_table()?;
+    let task = lua.create_function(move |lua, (header, steps): (String, Table)| {
+        let parsed = crate::taskdef::parse_header(&header).map_err(mlua::Error::external)?;
 
-        match def {
-            Value::Function(run) => {
-                spec.set("run", run)?;
-                spec.set("deps", lua.create_table()?)?;
-            }
-            Value::Table(def) => {
-                let run: Option<Function> = def.get("run")?;
-                let run = run.ok_or_else(|| {
-                    mlua::Error::external(format!(
-                        "task('{name}'): spec table has no `run` function"
-                    ))
-                })?;
-                spec.set("run", run)?;
-                let deps: Option<Table> = def.get("deps")?;
-                spec.set("deps", deps.map_or_else(|| lua.create_table(), Ok)?)?;
-                let desc: Option<String> = def.get("desc")?;
-                if let Some(desc) = desc {
-                    spec.set("desc", desc)?;
-                }
-            }
-            other => {
-                return Err(mlua::Error::external(format!(
-                    "task('{name}'): second argument must be a function or a spec table, got {}",
-                    other.type_name()
-                )));
-            }
+        let spec = lua.create_table()?;
+        spec.set("name", parsed.name.as_str())?;
+        spec.set("steps", steps)?;
+        spec.set("deps", lua.create_sequence_from(parsed.deps)?)?;
+        let params = lua.create_table()?;
+        for (i, p) in parsed.params.iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("name", p.name.as_str())?;
+            entry.set("default", p.default.as_deref())?;
+            params.set(i + 1, entry)?;
+        }
+        spec.set("params", params)?;
+
+        let docs: Table = lua.named_registry_value(DOCS_KEY)?;
+        if let Some(doc) = docs.get::<Option<String>>(parsed.name.as_str())? {
+            spec.set("doc", doc)?;
         }
 
         let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
-        if warnings && tasks.contains_key(&*name)? {
+        if warnings && tasks.contains_key(parsed.name.as_str())? {
             eprintln!(
-                "taku: warning: task '{name}' is defined more than once; the last definition wins"
+                "taku: warning: task '{}' is defined more than once; the last definition wins",
+                parsed.name
             );
         }
-        tasks.set(name, spec)?;
+        tasks.set(parsed.name.as_str(), spec)?;
         Ok(())
     })?;
     lua.globals().set("task", task)?;
@@ -191,7 +267,8 @@ mod tests {
 
     #[test]
     fn sandbox_hides_dangerous_libs_but_keeps_the_apis() {
-        let lua = build_state(Path::new("Takufile.lua"), "", true).unwrap();
+        let (lua, _env) =
+            build_state(Path::new("Takufile.lua"), "", true, crate::test_apis()).unwrap();
         let globals = lua.globals();
         for name in ["io", "os", "package", "debug", "dofile", "loadfile"] {
             let value: Value = globals.get(name).unwrap();
@@ -200,7 +277,14 @@ mod tests {
                 "{name} should not be reachable in the sandbox"
             );
         }
-        let expected = ["cmd", "fs", "net", "env", "task", "import", "fmt", "raw"];
+        let expected = all_apis(crate::test_apis()).flat_map(|api| {
+            api.globals.iter().copied().chain(
+                api.steps
+                    .iter()
+                    .filter(|def| !matches!(def.arg, Arg::Hidden))
+                    .map(|def| def.tag),
+            )
+        });
         for name in expected {
             let value: Value = globals.get(name).unwrap();
             assert!(!value.is_nil(), "{name} API should be present");
@@ -216,7 +300,7 @@ mod tests {
         let src = "import('child.lua')\nimport('child.lua')\nassert(count == 1, 'imported twice')";
         std::fs::write(&main, src).unwrap();
 
-        let result = build_state(&main, src, true);
+        let result = build_state(&main, src, true, crate::test_apis());
         std::fs::remove_dir_all(&dir).unwrap();
         result.unwrap();
     }

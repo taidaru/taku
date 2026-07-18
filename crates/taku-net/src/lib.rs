@@ -5,8 +5,10 @@ use std::net::TcpStream;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use mlua::Value;
 use sha2::{Digest, Sha256};
 use taku_api::ext;
+use taku_api::steps::{Arg, StepDef};
 use ureq::Agent;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -55,7 +57,15 @@ pub fn download(url: &str, path: &str, sha256: Option<&str>) -> mlua::Result<()>
     let ctx = format!("net.download({url} -> {path})");
     let mut body = http::get_reader(agent(), url).map_err(|e| ext(&ctx, e))?;
     let mut file = std::fs::File::create(path).map_err(|e| ext(&ctx, e))?;
-    let digest = copy_hashed(&mut body, &mut file).map_err(|e| ext(&ctx, e))?;
+    let digest = match copy_hashed(&mut body, &mut file) {
+        Ok(digest) => digest,
+        Err(e) => {
+            // A partial transfer must not be left looking downloaded
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(ext(&ctx, e));
+        }
+    };
     if let Some(expected) = sha256
         && !digest.eq_ignore_ascii_case(expected)
     {
@@ -69,6 +79,24 @@ pub fn download(url: &str, path: &str, sha256: Option<&str>) -> mlua::Result<()>
     }
     Ok(())
 }
+
+pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
+    globals: &["net"],
+    register: |lua, _ctx| register(lua),
+    steps: &[StepDef {
+        tag: "download",
+        arg: Arg::Table,
+        run: |_, t, ctx| {
+            let url = ctx.fmt_field_or_first(t, "url")?;
+            let to = ctx.fmt_value(t.get("to")?)?;
+            let sha: Option<String> = match t.get::<Value>("sha256")? {
+                Value::Nil => None,
+                v => Some(ctx.fmt_value(v)?),
+            };
+            download(&url, &to, sha.as_deref())
+        },
+    }],
+};
 
 pub fn register(lua: &mlua::Lua) -> mlua::Result<()> {
     taku_api::lua_api!(lua, global = "net" {
@@ -90,6 +118,7 @@ pub fn register(lua: &mlua::Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::copy_hashed;
+    use std::io::{self, Read};
 
     #[test]
     fn copy_hashed_matches_known_digest() {
@@ -101,5 +130,31 @@ mod tests {
             digest,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    struct FailAfter {
+        left: usize,
+    }
+    impl Read for FailAfter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.left == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "boom"));
+            }
+            let n = self.left.min(buf.len());
+            buf[..n].fill(b'x');
+            self.left -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn download_removes_file_on_midstream_error() {
+        let path = std::env::temp_dir().join(format!("taku-dl-{}.tmp", std::process::id()));
+        let mut file = std::fs::File::create(&path).unwrap();
+        let err = copy_hashed(&mut FailAfter { left: 1024 }, &mut file).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists(), "truncated file must not survive");
     }
 }
