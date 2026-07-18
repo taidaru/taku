@@ -549,6 +549,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "taku-cmd"
+version = "0.1.4"
+dependencies = [
+ "mlua",
+ "taku-api",
+]
+
+[[package]]
 name = "taku-env"
 version = "0.1.4"
 dependencies = [
@@ -579,18 +587,10 @@ name = "taku-runtime"
 version = "0.1.4"
 dependencies = [
  "mlua",
+ "taku-cmd",
  "taku-env",
  "taku-fs",
  "taku-net",
- "taku-shell",
-]
-
-[[package]]
-name = "taku-shell"
-version = "0.1.4"
-dependencies = [
- "mlua",
- "taku-api",
 ]
 
 [[package]]

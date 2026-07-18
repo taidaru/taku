@@ -41,7 +41,7 @@ pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<L
     register_task(&lua, warnings)?;
 
     taku_fs::register(&lua)?;
-    taku_shell::register(&lua)?;
+    taku_cmd::register(&lua)?;
     taku_net::register(&lua)?;
     taku_env::register(&lua, dotenv)?;
 
@@ -177,7 +177,7 @@ mod tests {
                 "{name} should not be reachable in the sandbox"
             );
         }
-        let expected = ["sh", "fs", "net", "env", "task", "import"];
+        let expected = ["cmd", "fs", "net", "env", "task", "import"];
         for name in expected {
             let value: Value = globals.get(name).unwrap();
             assert!(!value.is_nil(), "{name} API should be present");

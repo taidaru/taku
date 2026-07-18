@@ -31,7 +31,7 @@ fn command(argv: &[String], opts: &Opts) -> Command {
 }
 
 fn err<E: Display>(op: &str, argv: &[String], e: E) -> mlua::Error {
-    mlua::Error::external(format!("sh.{op}({}): {e}", argv.join(" ")))
+    mlua::Error::external(format!("cmd.{op}({}): {e}", argv.join(" ")))
 }
 
 fn feed(stdin: &mut ChildStdin, data: &[u8]) -> io::Result<()> {
@@ -122,16 +122,16 @@ pub fn parse_argv(value: Value) -> mlua::Result<Vec<String>> {
         Value::Table(t) => {
             let argv: Vec<String> = t.sequence_values::<String>().collect::<mlua::Result<_>>()?;
             if argv.is_empty() {
-                return Err(mlua::Error::external("sh: argument list is empty"));
+                return Err(mlua::Error::external("cmd: argument list is empty"));
             }
             Ok(argv)
         }
         Value::String(_) => Err(mlua::Error::external(
-            "sh: a command is a list of arguments, e.g. { \"cargo\", \"build\" } \
+            "cmd: a command is a list of arguments, e.g. { \"cargo\", \"build\" } \
              (for a shell, run it explicitly: { \"sh\", \"-c\", \"...\" })",
         )),
         other => Err(mlua::Error::external(format!(
-            "sh: command must be a list of strings, got {}",
+            "cmd: command must be a list of strings, got {}",
             other.type_name()
         ))),
     }
@@ -156,8 +156,21 @@ fn parse_opts(opts: Option<Table>) -> mlua::Result<Opts> {
 }
 
 pub fn register(lua: &Lua) -> mlua::Result<()> {
-    taku_api::lua_api!(lua, global = "sh" {
+    taku_api::lua_api!(lua, global = "cmd" {
+        // cmd.run: success or error — a non-zero exit raises.
         run => |_, (cmd, opts): (Value, Option<Table>)| {
+            let argv = parse_argv(cmd)?;
+            let code = run(&argv, &parse_opts(opts)?)?;
+            if code != 0 {
+                return Err(mlua::Error::external(format!(
+                    "cmd.run({}): exit {code}",
+                    argv.join(" ")
+                )));
+            }
+            Ok(())
+        },
+        // cmd.try: like run, but the exit code is the caller's problem.
+        try => |_, (cmd, opts): (Value, Option<Table>)| {
             run(&parse_argv(cmd)?, &parse_opts(opts)?)
         },
         capture => |lua, (cmd, opts): (Value, Option<Table>)| {
@@ -184,7 +197,7 @@ mod tests {
     #[test]
     fn argv_is_not_run_through_a_shell() {
         run(r#"
-            local r = sh.capture({ "printf", "%s", "$HOME" })
+            local r = cmd.capture({ "printf", "%s", "$HOME" })
             assert(r.code == 0, "exit " .. r.code)
             assert(r.stdout == "$HOME", "got: " .. r.stdout)
         "#);
@@ -193,7 +206,7 @@ mod tests {
     #[test]
     fn an_explicit_shell_still_works_as_an_escape_hatch() {
         run(r#"
-            local r = sh.capture({ "sh", "-c", 'printf %s "$FOO"' }, { env = { FOO = "bar" } })
+            local r = cmd.capture({ "sh", "-c", 'printf %s "$FOO"' }, { env = { FOO = "bar" } })
             assert(r.stdout == "bar", "got: " .. r.stdout)
         "#);
     }
@@ -201,7 +214,7 @@ mod tests {
     #[test]
     fn stdin_is_fed_to_the_command() {
         run(r#"
-            local r = sh.capture({ "cat" }, { stdin = "hello\nworld" })
+            local r = cmd.capture({ "cat" }, { stdin = "hello\nworld" })
             assert(r.stdout == "hello\nworld", "got: " .. r.stdout)
         "#);
     }
@@ -209,17 +222,32 @@ mod tests {
     #[test]
     fn env_and_cwd_apply() {
         run(r#"
-            local r = sh.capture({ "printenv", "TAKU_TEST" }, { env = { TAKU_TEST = "xyz" } })
+            local r = cmd.capture({ "printenv", "TAKU_TEST" }, { env = { TAKU_TEST = "xyz" } })
             assert(r.code == 0 and r.stdout == "xyz\n", "env got: " .. r.stdout)
-            local p = sh.capture({ "pwd" }, { cwd = "/" })
+            local p = cmd.capture({ "pwd" }, { cwd = "/" })
             assert(p.stdout == "/\n", "cwd got: " .. p.stdout)
         "#);
     }
 
     #[test]
-    fn nonzero_exit_is_reported_not_raised() {
+    fn run_raises_on_nonzero_exit() {
+        run(r#"cmd.run({ "true" })"#);
+        let err = lua().load(r#"cmd.run({ "false" })"#).exec().unwrap_err();
+        assert!(err.to_string().contains("exit 1"), "got: {err}");
+    }
+
+    #[test]
+    fn try_returns_the_exit_code() {
         run(r#"
-            local r = sh.capture({ "false" })
+            assert(cmd.try({ "true" }) == 0)
+            assert(cmd.try({ "false" }) == 1)
+        "#);
+    }
+
+    #[test]
+    fn nonzero_exit_is_reported_not_raised_by_capture() {
+        run(r#"
+            local r = cmd.capture({ "false" })
             assert(r.code ~= 0, "false should exit non-zero")
         "#);
     }
@@ -228,7 +256,7 @@ mod tests {
     fn large_stdin_does_not_deadlock_capture() {
         run(r#"
             local big = string.rep("x", 1024 * 1024)
-            local r = sh.capture({ "cat" }, { stdin = big })
+            local r = cmd.capture({ "cat" }, { stdin = big })
             assert(r.code == 0, "exit " .. r.code)
             assert(#r.stdout == #big, "got " .. #r.stdout .. " bytes")
         "#);
@@ -238,20 +266,20 @@ mod tests {
     fn child_ignoring_stdin_is_not_an_error() {
         run(r#"
             local big = string.rep("x", 1024 * 1024)
-            local r = sh.capture({ "true" }, { stdin = big })
+            local r = cmd.capture({ "true" }, { stdin = big })
             assert(r.code == 0, "exit " .. r.code)
         "#);
     }
 
     #[test]
     fn a_string_command_is_rejected_with_a_hint() {
-        let err = lua().load(r#"sh.run("cargo build")"#).exec().unwrap_err();
+        let err = lua().load(r#"cmd.run("cargo build")"#).exec().unwrap_err();
         assert!(err.to_string().contains("list of arguments"));
     }
 
     #[test]
     fn empty_argv_is_rejected() {
-        let err = lua().load("sh.run({})").exec().unwrap_err();
+        let err = lua().load("cmd.run({})").exec().unwrap_err();
         assert!(err.to_string().contains("argument list is empty"));
     }
 }

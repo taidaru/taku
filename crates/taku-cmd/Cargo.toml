@@ -1,5 +1,5 @@
 [package]
-name = "taku-shell"
+name = "taku-cmd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

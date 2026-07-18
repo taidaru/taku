@@ -32,7 +32,7 @@ taku-runtime = { path = "crates/taku-runtime" }
 taku-api = { path = "crates/taku-api" }
 taku-fs = { path = "crates/taku-fs" }
 taku-net = { path = "crates/taku-net" }
-taku-shell = { path = "crates/taku-shell" }
+taku-cmd = { path = "crates/taku-cmd" }
 taku-env = { path = "crates/taku-env" }
 
 [profile.release]

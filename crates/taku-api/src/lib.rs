@@ -11,7 +11,8 @@ pub fn ext<E: std::fmt::Display>(ctx: &str, e: E) -> mlua::Error {
 /// the macro emits only the mechanical `create_function` + table wiring.
 #[macro_export]
 macro_rules! lua_api {
-    ($lua:expr, global = $global:literal { $($method:ident => $func:expr),+ $(,)? }) => {{
+    // `$method:tt`, not `ident`: a Lua method may be a Rust keyword (`cmd.try`).
+    ($lua:expr, global = $global:literal { $($method:tt => $func:expr),+ $(,)? }) => {{
         let lua = $lua;
         let tbl = lua.create_table()?;
         $( tbl.set(stringify!($method), lua.create_function($func)?)?; )+
