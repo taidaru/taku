@@ -159,6 +159,7 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     taku_api::lua_api!(lua, global = "cmd" {
         // cmd.run: success or error — a non-zero exit raises.
         run => |_, (cmd, opts): (Value, Option<Table>)| {
+            taku_api::require_runtime("cmd.run")?;
             let argv = parse_argv(cmd)?;
             let code = run(&argv, &parse_opts(opts)?)?;
             if code != 0 {
@@ -171,9 +172,11 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
         },
         // cmd.try: like run, but the exit code is the caller's problem.
         try => |_, (cmd, opts): (Value, Option<Table>)| {
+            taku_api::require_runtime("cmd.try")?;
             run(&parse_argv(cmd)?, &parse_opts(opts)?)
         },
         capture => |lua, (cmd, opts): (Value, Option<Table>)| {
+            taku_api::require_runtime("cmd.capture")?;
             capture_table(lua, capture(&parse_argv(cmd)?, &parse_opts(opts)?)?)
         },
     })
@@ -185,9 +188,23 @@ mod tests {
     use mlua::Lua;
 
     fn lua() -> Lua {
+        // Tests exercise the API as a task body would: runtime phase on.
+        taku_api::set_runtime(true);
         let lua = Lua::new();
         register(&lua).unwrap();
         lua
+    }
+
+    #[test]
+    fn effects_are_rejected_at_load_phase() {
+        let lua = lua();
+        taku_api::set_runtime(false);
+        let err = lua.load(r#"cmd.run({ "true" })"#).exec().unwrap_err();
+        taku_api::set_runtime(true);
+        assert!(
+            err.to_string()
+                .contains("only available while a task is running")
+        );
     }
 
     fn run(src: &str) {

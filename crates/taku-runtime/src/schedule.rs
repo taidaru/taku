@@ -146,6 +146,37 @@ fn run_task_body(path: &Path, source: &str, name: &str) -> Result<(), Error> {
             available: Vec::new(),
         })?;
     let run: Function = spec.get("run")?;
-    run.call::<()>(())?;
+    // Effects (`cmd.*`, fs writes, `net.*`) are gated on the runtime phase;
+    // only the task body — never top-level Takufile code — may perform them.
+    taku_api::set_runtime(true);
+    let result = run.call::<()>(());
+    taku_api::set_runtime(false);
+    result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effects_fail_at_load_but_work_in_a_task_body() {
+        let dir = std::env::temp_dir().join(format!("taku-phase-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Takufile.lua");
+        let sub = dir.join("made-by-task").display().to_string();
+
+        let top_level = format!("fs.mkdir('{sub}')");
+        let err = build_state(&path, &top_level, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only available while a task is running"),
+            "got: {err}"
+        );
+
+        let source = format!("task('t', function() fs.mkdir('{sub}') end)");
+        run_task_body(&path, &source, "t").unwrap();
+        assert!(std::path::Path::new(&sub).is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

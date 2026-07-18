@@ -6,6 +6,33 @@ pub fn ext<E: std::fmt::Display>(ctx: &str, e: E) -> mlua::Error {
     mlua::Error::external(format!("{ctx}: {e}"))
 }
 
+std::thread_local! {
+    /// Load vs runtime phase. Thread-local because each task body runs in its
+    /// own worker thread with its own Lua state.
+    static RUNTIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The runtime flips this on around a task body; everything else is load phase.
+pub fn set_runtime(on: bool) {
+    RUNTIME.with(|c| c.set(on));
+}
+
+pub fn is_runtime() -> bool {
+    RUNTIME.with(|c| c.get())
+}
+
+/// Guard for effectful API closures: queries run any time, effects only while
+/// a task is executing.
+pub fn require_runtime(what: &str) -> mlua::Result<()> {
+    if is_runtime() {
+        Ok(())
+    } else {
+        Err(mlua::Error::external(format!(
+            "{what}: only available while a task is running (not at load time)"
+        )))
+    }
+}
+
 /// Builds an API table and installs it as the `$global` Lua global: one entry
 /// per `method => closure` pair. The closures stay literal at the call site;
 /// the macro emits only the mechanical `create_function` + table wiring.

@@ -75,15 +75,33 @@ pub fn glob(pattern: &str) -> mlua::Result<Vec<String>> {
 pub fn register(lua: &mlua::Lua) -> mlua::Result<()> {
     taku_api::lua_api!(lua, global = "fs" {
         read => |lua, path: String| lua.create_string(read(&path)?),
-        write => |_, (path, contents): (String, mlua::String)| write(&path, &contents.as_bytes()),
-        append => |_, (path, contents): (String, mlua::String)| append(&path, &contents.as_bytes()),
+        write => |_, (path, contents): (String, mlua::String)| {
+            taku_api::require_runtime("fs.write")?;
+            write(&path, &contents.as_bytes())
+        },
+        append => |_, (path, contents): (String, mlua::String)| {
+            taku_api::require_runtime("fs.append")?;
+            append(&path, &contents.as_bytes())
+        },
         exists => |_, path: String| Ok(Path::new(&path).exists()),
         is_file => |_, path: String| Ok(Path::new(&path).is_file()),
         is_dir => |_, path: String| Ok(Path::new(&path).is_dir()),
-        mkdir => |_, path: String| mkdir(&path),
-        rm => |_, path: String| rm(&path),
-        cp => |_, (src, dst): (String, String)| cp(&src, &dst),
-        mv => |_, (src, dst): (String, String)| mv(&src, &dst),
+        mkdir => |_, path: String| {
+            taku_api::require_runtime("fs.mkdir")?;
+            mkdir(&path)
+        },
+        rm => |_, path: String| {
+            taku_api::require_runtime("fs.rm")?;
+            rm(&path)
+        },
+        cp => |_, (src, dst): (String, String)| {
+            taku_api::require_runtime("fs.cp")?;
+            cp(&src, &dst)
+        },
+        mv => |_, (src, dst): (String, String)| {
+            taku_api::require_runtime("fs.mv")?;
+            mv(&src, &dst)
+        },
         ls => |lua, path: String| {
             let list = lua.create_table()?;
             for (i, name) in ls(&path)?.into_iter().enumerate() {

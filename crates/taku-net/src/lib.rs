@@ -73,10 +73,15 @@ pub fn download(url: &str, path: &str, sha256: Option<&str>) -> mlua::Result<()>
 pub fn register(lua: &mlua::Lua) -> mlua::Result<()> {
     taku_api::lua_api!(lua, global = "net" {
         tcp => |lua, (host, port, data): (String, u16, mlua::String)| {
+            taku_api::require_runtime("net.tcp")?;
             lua.create_string(tcp(&host, port, &data.as_bytes())?)
         },
-        get => |lua, url: String| lua.create_string(get(&url)?),
+        get => |lua, url: String| {
+            taku_api::require_runtime("net.get")?;
+            lua.create_string(get(&url)?)
+        },
         download => |_, (url, path, sha256): (String, String, Option<String>)| {
+            taku_api::require_runtime("net.download")?;
             download(&url, &path, sha256.as_deref())
         },
     })
