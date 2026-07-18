@@ -579,7 +579,6 @@ name = "taku-runtime"
 version = "0.1.4"
 dependencies = [
  "mlua",
- "taku-api",
  "taku-env",
  "taku-fs",
  "taku-net",

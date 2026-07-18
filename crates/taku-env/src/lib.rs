@@ -3,55 +3,25 @@ use std::sync::Arc;
 
 pub use dotenvy::Error as DotenvError;
 
-pub trait Env: Send + Sync {
-    fn get(&self, name: &str) -> mlua::Result<Option<String>>;
+/// The real process env wins; the project `.env` only fills what's unset.
+pub fn get(dotenv: &HashMap<String, String>, name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .or_else(|| dotenv.get(name).cloned())
 }
 
-pub struct Local {
-    dotenv: Arc<HashMap<String, String>>,
-}
-
-impl Local {
-    pub fn new() -> Self {
-        Local {
-            dotenv: Arc::new(HashMap::new()),
-        }
-    }
-
-    pub fn with_dotenv(dotenv: Arc<HashMap<String, String>>) -> Self {
-        Local { dotenv }
-    }
-}
-
-impl Default for Local {
-    fn default() -> Self {
-        Local::new()
-    }
-}
-
-impl Env for Local {
-    fn get(&self, name: &str) -> mlua::Result<Option<String>> {
-        if let Ok(value) = std::env::var(name) {
-            return Ok(Some(value));
-        }
-        Ok(self.dotenv.get(name).cloned())
-    }
-}
-
-pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
-    global: "env",
-    register: |lua, ctx| register(lua, Arc::new(Local::with_dotenv(ctx.dotenv.clone()))),
-};
-
-taku_api::lua_api! {
-    pub fn register(global = "env", backend: Env as e) {
-        get => |_, (name, default): (String, Option<String>)| Ok(e.get(&name)?.or(default)),
-        require => |_, name: String| {
-            e.get(&name)?.ok_or_else(|| {
+pub fn register(lua: &mlua::Lua, dotenv: Arc<HashMap<String, String>>) -> mlua::Result<()> {
+    let map = dotenv.clone();
+    taku_api::lua_api!(lua, global = "env" {
+        get => move |_, (name, default): (String, Option<String>)| {
+            Ok(get(&map, &name).or(default))
+        },
+        require => move |_, name: String| {
+            get(&dotenv, &name).ok_or_else(|| {
                 mlua::Error::external(format!("env.require('{name}'): variable is not set"))
             })
         },
-    }
+    })
 }
 
 pub fn parse_dotenv(contents: &str) -> Result<HashMap<String, String>, dotenvy::Error> {
@@ -103,13 +73,12 @@ mod tests {
             "TAKU_ENV_TEST_ONLY_DOTENV".to_string(),
             "fallback".to_string(),
         );
-        let local = Local::with_dotenv(Arc::new(dotenv));
         assert_eq!(
-            local.get("PATH").unwrap().as_deref(),
+            get(&dotenv, "PATH").as_deref(),
             Some(std::env::var("PATH").unwrap().as_str())
         );
         assert_eq!(
-            local.get("TAKU_ENV_TEST_ONLY_DOTENV").unwrap(),
+            get(&dotenv, "TAKU_ENV_TEST_ONLY_DOTENV"),
             Some("fallback".to_string())
         );
     }

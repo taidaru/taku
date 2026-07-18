@@ -1,7 +1,6 @@
 use std::fmt::Display;
 use std::io::{self, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
-use std::sync::Arc;
 
 use mlua::{Lua, Table, Value};
 
@@ -18,26 +17,17 @@ pub struct Capture {
     pub stderr: Vec<u8>,
 }
 
-pub trait Shell: Send + Sync {
-    fn run(&self, argv: &[String], opts: &Opts) -> mlua::Result<i32>;
-    fn capture(&self, argv: &[String], opts: &Opts) -> mlua::Result<Capture>;
-}
-
-pub struct Local;
-
-impl Local {
-    fn command(argv: &[String], opts: &Opts) -> Command {
-        // Callers must pass a non-empty argv (enforced at the Lua boundary by
-        // `parse_argv`).
-        debug_assert!(!argv.is_empty(), "argv must be non-empty");
-        let mut command = Command::new(&argv[0]);
-        command.args(&argv[1..]);
-        if let Some(cwd) = &opts.cwd {
-            command.current_dir(cwd);
-        }
-        command.envs(opts.env.iter().map(|(k, v)| (k, v)));
-        command
+fn command(argv: &[String], opts: &Opts) -> Command {
+    // Callers must pass a non-empty argv (enforced at the Lua boundary by
+    // `parse_argv`).
+    debug_assert!(!argv.is_empty(), "argv must be non-empty");
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    if let Some(cwd) = &opts.cwd {
+        command.current_dir(cwd);
     }
+    command.envs(opts.env.iter().map(|(k, v)| (k, v)));
+    command
 }
 
 fn err<E: Display>(op: &str, argv: &[String], e: E) -> mlua::Error {
@@ -91,35 +81,32 @@ pub fn wait_status_with_input(mut child: Child, data: Option<&[u8]>) -> io::Resu
     })
 }
 
-impl Shell for Local {
-    fn run(&self, argv: &[String], opts: &Opts) -> mlua::Result<i32> {
-        let mut command = Local::command(argv, opts);
-        if opts.stdin.is_some() {
-            command.stdin(Stdio::piped());
-        }
-        let child = command.spawn().map_err(|e| err("run", argv, e))?;
-        let status = wait_status_with_input(child, opts.stdin.as_deref())
-            .map_err(|e| err("run", argv, e))?;
-        Ok(status.code().unwrap_or(-1))
+pub fn run(argv: &[String], opts: &Opts) -> mlua::Result<i32> {
+    let mut command = command(argv, opts);
+    if opts.stdin.is_some() {
+        command.stdin(Stdio::piped());
     }
+    let child = command.spawn().map_err(|e| err("run", argv, e))?;
+    let status =
+        wait_status_with_input(child, opts.stdin.as_deref()).map_err(|e| err("run", argv, e))?;
+    Ok(status.code().unwrap_or(-1))
+}
 
-    fn capture(&self, argv: &[String], opts: &Opts) -> mlua::Result<Capture> {
-        let mut command = Local::command(argv, opts);
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        command.stdin(if opts.stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        let child = command.spawn().map_err(|e| err("capture", argv, e))?;
-        let out =
-            wait_with_input(child, opts.stdin.as_deref()).map_err(|e| err("capture", argv, e))?;
-        Ok(Capture {
-            code: out.status.code().unwrap_or(-1),
-            stdout: out.stdout,
-            stderr: out.stderr,
-        })
-    }
+pub fn capture(argv: &[String], opts: &Opts) -> mlua::Result<Capture> {
+    let mut command = command(argv, opts);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.stdin(if opts.stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    let child = command.spawn().map_err(|e| err("capture", argv, e))?;
+    let out = wait_with_input(child, opts.stdin.as_deref()).map_err(|e| err("capture", argv, e))?;
+    Ok(Capture {
+        code: out.status.code().unwrap_or(-1),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
 }
 
 pub fn capture_table(lua: &Lua, out: Capture) -> mlua::Result<Table> {
@@ -168,20 +155,15 @@ fn parse_opts(opts: Option<Table>) -> mlua::Result<Opts> {
     Ok(out)
 }
 
-pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
-    global: "sh",
-    register: |lua, _ctx| register(lua, Arc::new(Local)),
-};
-
-taku_api::lua_api! {
-    pub fn register(global = "sh", backend: Shell as s) {
+pub fn register(lua: &Lua) -> mlua::Result<()> {
+    taku_api::lua_api!(lua, global = "sh" {
         run => |_, (cmd, opts): (Value, Option<Table>)| {
-            s.run(&parse_argv(cmd)?, &parse_opts(opts)?)
+            run(&parse_argv(cmd)?, &parse_opts(opts)?)
         },
         capture => |lua, (cmd, opts): (Value, Option<Table>)| {
-            capture_table(lua, s.capture(&parse_argv(cmd)?, &parse_opts(opts)?)?)
+            capture_table(lua, capture(&parse_argv(cmd)?, &parse_opts(opts)?)?)
         },
-    }
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -191,7 +173,7 @@ mod tests {
 
     fn lua() -> Lua {
         let lua = Lua::new();
-        register(&lua, Arc::new(Local)).unwrap();
+        register(&lua).unwrap();
         lua
     }
 

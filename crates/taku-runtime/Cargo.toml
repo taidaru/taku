@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 mlua.workspace = true
-taku-api.workspace = true
 taku-fs.workspace = true
 taku-shell.workspace = true
 taku-env.workspace = true

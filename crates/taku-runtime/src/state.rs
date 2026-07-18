@@ -40,10 +40,10 @@ pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<L
     register_import(&lua, base)?;
     register_task(&lua, warnings)?;
 
-    let ctx = taku_api::RegisterCtx { dotenv };
-    for api in crate::registry::apis() {
-        (api.register)(&lua, &ctx)?;
-    }
+    taku_fs::register(&lua)?;
+    taku_shell::register(&lua)?;
+    taku_net::register(&lua)?;
+    taku_env::register(&lua, dotenv)?;
 
     lua.load(source)
         .set_name(format!("@{}", path.to_string_lossy()))
@@ -177,8 +177,7 @@ mod tests {
                 "{name} should not be reachable in the sandbox"
             );
         }
-        let apis = crate::registry::apis();
-        let expected = apis.iter().map(|api| api.global).chain(["task", "import"]);
+        let expected = ["sh", "fs", "net", "env", "task", "import"];
         for name in expected {
             let value: Value = globals.get(name).unwrap();
             assert!(!value.is_nil(), "{name} API should be present");

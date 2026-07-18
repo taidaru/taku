@@ -1,7 +1,6 @@
 mod diagnostic;
 mod error;
 mod plan;
-mod registry;
 mod report;
 mod schedule;
 mod state;
