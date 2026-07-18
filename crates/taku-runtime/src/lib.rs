@@ -1,5 +1,6 @@
 mod diagnostic;
 mod error;
+mod fmtstr;
 mod plan;
 mod report;
 mod schedule;

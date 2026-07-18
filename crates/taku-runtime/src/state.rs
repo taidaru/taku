@@ -39,6 +39,7 @@ pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<L
 
     register_import(&lua, base)?;
     register_task(&lua, warnings)?;
+    register_builtins(&lua, dotenv.clone())?;
 
     taku_fs::register(&lua)?;
     taku_cmd::register(&lua)?;
@@ -49,6 +50,28 @@ pub(crate) fn build_state(path: &Path, source: &str, warnings: bool) -> Result<L
         .set_name(format!("@{}", path.to_string_lossy()))
         .exec()?;
     Ok(lua)
+}
+
+/// `raw()` and `fmt()` — the placeholder-formatter builtins.
+fn register_builtins(lua: &Lua, dotenv: Arc<HashMap<String, String>>) -> Result<(), Error> {
+    // raw("..."): a value the executor passes through without formatting.
+    let raw = lua.create_function(|lua, s: mlua::String| {
+        let t = lua.create_table()?;
+        t.set("__raw", s)?;
+        Ok(t)
+    })?;
+    lua.globals().set("raw", raw)?;
+
+    // fmt("..."): manual formatting inside function-steps.
+    // task vars are wired in with ctx later; env/.env works already.
+    let fmt = lua.create_function(move |_, template: String| {
+        crate::fmtstr::format(&template, &HashMap::new(), &|name| {
+            taku_env::get(&dotenv, name)
+        })
+        .map_err(|e| mlua::Error::external(format!("fmt: {e}")))
+    })?;
+    lua.globals().set("fmt", fmt)?;
+    Ok(())
 }
 
 fn new_sandboxed() -> Result<Lua, Error> {
@@ -177,7 +200,7 @@ mod tests {
                 "{name} should not be reachable in the sandbox"
             );
         }
-        let expected = ["cmd", "fs", "net", "env", "task", "import"];
+        let expected = ["cmd", "fs", "net", "env", "task", "import", "fmt", "raw"];
         for name in expected {
             let value: Value = globals.get(name).unwrap();
             assert!(!value.is_nil(), "{name} API should be present");
