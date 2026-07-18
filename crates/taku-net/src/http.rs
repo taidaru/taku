@@ -6,7 +6,7 @@ use ureq::config::Config;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `net.http_get` buffers the body in memory (and hands it to Lua), so it
+/// `net.get` buffers the body in memory (and hands it to Lua), so it
 /// gets a deliberately modest cap; `net.download` streams to disk and only
 /// caps against unbounded responses.
 const GET_LIMIT: u64 = 64 * 1024 * 1024;
