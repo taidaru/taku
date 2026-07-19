@@ -24,6 +24,7 @@ pub(crate) struct Ctx {
     pub yes: bool,
     pub force: bool,
     pub explain: bool,
+    pub dry_run: bool,
     pub done: Done,
     /// State file to write after the task succeeds, set by an `unchanged`
     /// guard that decided to run.
@@ -170,6 +171,9 @@ fn run_step(
     step: Value,
     ctx: &mut Ctx,
 ) -> Result<Flow, Error> {
+    if ctx.dry_run {
+        return dry_step(lua, apis, spec, step, ctx);
+    }
     let cont = |r: Result<(), Error>| r.map(|()| Flow::Continue);
     match step {
         // "cargo build ${target}" — a bare command template
@@ -226,6 +230,79 @@ fn run_step(
     }
 }
 
+fn dry_step(
+    lua: &Lua,
+    apis: &'static [ApiEntry],
+    spec: &Table,
+    step: Value,
+    ctx: &mut Ctx,
+) -> Result<Flow, Error> {
+    match step {
+        Value::String(s) => println!("  {}", s.to_string_lossy()),
+        Value::Function(f) => {
+            let info = f.info();
+            let src = info.short_src.as_deref().unwrap_or("?").to_string();
+            let line = info
+                .line_defined
+                .map_or_else(|| "?".to_string(), |l| l.to_string());
+            println!("  <lua {src}:{line}>");
+        }
+        Value::Table(t) => {
+            let tag: Option<String> = t.get(TAG)?;
+            match tag.as_deref() {
+                None => println!("  {}", dry_table("cmd", &t)?),
+                Some("invoke") => {
+                    let name: String = t.get(1)?;
+                    println!("  invoke \"{name}\"");
+                    run_invoke(lua, apis, &name, &t, ctx)?;
+                }
+                Some("unchanged") => {
+                    let decision = crate::incremental::check(spec, &t, ctx)?;
+                    ctx.pending_state = None; // a dry run must not write state
+                    if matches!(decision, crate::incremental::Decision::Skip) {
+                        println!("  unchanged: the remaining steps would be skipped");
+                        return Ok(Flow::Skip);
+                    }
+                    println!("  unchanged: the remaining steps would run");
+                }
+                Some(tag) => println!("  {}", dry_table(tag, &t)?),
+            }
+        }
+        other => {
+            return Err(Error::TaskFailed(format!(
+                "a step must be a string, a table, or a function, got {}",
+                other.type_name()
+            )));
+        }
+    }
+    Ok(Flow::Continue)
+}
+
+/// `tag "positional" key=value ...`, named keys sorted, templates unresolved.
+fn dry_table(tag: &str, t: &Table) -> Result<String, Error> {
+    let mut out = tag.to_string();
+    for v in t.sequence_values::<Value>() {
+        out.push(' ');
+        crate::incremental::write_value(&mut out, &v?);
+    }
+    let mut named: Vec<(String, Value)> = Vec::new();
+    for pair in t.pairs::<Value, Value>() {
+        let (k, v) = pair?;
+        if let Value::String(s) = &k {
+            let key = s.to_string_lossy().to_string();
+            if key != TAG {
+                named.push((key, v));
+            }
+        }
+    }
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    for (k, v) in named {
+        out.push_str(&format!(" {k}="));
+        crate::incremental::write_value(&mut out, &v);
+    }
+    Ok(out)
+}
+
 /// `invoke "task"` — run another task's steps here and now.
 fn run_invoke(
     lua: &Lua,
@@ -245,6 +322,7 @@ fn run_invoke(
         yes: ctx.yes,
         force: ctx.force,
         explain: ctx.explain,
+        dry_run: ctx.dry_run,
         done: ctx.done.clone(),
         pending_state: None,
     };

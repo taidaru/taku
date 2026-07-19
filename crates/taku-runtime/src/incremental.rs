@@ -186,7 +186,8 @@ fn hash(data: &[u8]) -> u64 {
 
 /// Stable, order-independent text form of a step value. Function steps are
 /// opaque and serialize as a placeholder — their bodies aren't fingerprinted.
-fn write_value(out: &mut String, v: &Value) {
+/// Also reused by `--dry-run` to render step arguments.
+pub(crate) fn write_value(out: &mut String, v: &Value) {
     match v {
         Value::String(s) => {
             out.push('"');

@@ -35,6 +35,10 @@ pub enum Command {
         /// Print why an `unchanged` guard skipped or rebuilt
         #[arg(long)]
         explain: bool,
+
+        /// Print the plan without executing it (templates stay unresolved)
+        #[arg(short = 'n', long)]
+        dry_run: bool,
     },
     #[command(visible_alias = "ls")]
     List,

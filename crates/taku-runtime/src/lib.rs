@@ -34,6 +34,9 @@ pub struct RunOpts<'a> {
     pub force: bool,
     /// `--explain`: print why an `unchanged` guard skipped or rebuilt.
     pub explain: bool,
+    /// `--dry-run`: print the plan instead of executing it. Command steps
+    /// show their unresolved templates so secrets stay out of the output.
+    pub dry_run: bool,
 }
 
 pub struct Runtime {
@@ -69,6 +72,9 @@ impl Runtime {
         let tasks: Table = self.lua.named_registry_value(TASKS_KEY)?;
         let spec: Table = tasks.get(command)?; // plan::build validated the name
         let overrides = exec::validate_vars(&spec, opts.vars)?;
+        if opts.dry_run {
+            println!("{}", plan::render(&plan, command));
+        }
         let style = report::Style::init();
 
         let start = Instant::now();

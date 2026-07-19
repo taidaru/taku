@@ -50,10 +50,14 @@ pub(crate) fn execute(
     roots.sort();
     let mut ready: VecDeque<&str> = roots.into();
 
-    let max = opts
-        .jobs
-        .or_else(|| std::thread::available_parallelism().ok())
-        .map_or(1, NonZeroUsize::get);
+    // a dry run is sequential so its printed plan doesn't interleave
+    let max = if opts.dry_run {
+        1
+    } else {
+        opts.jobs
+            .or_else(|| std::thread::available_parallelism().ok())
+            .map_or(1, NonZeroUsize::get)
+    };
     let mut running = 0;
     let mut first_err: Option<Error> = None;
     let worker_style = *style;
@@ -197,9 +201,13 @@ fn run_task_body(
         yes: opts.yes,
         force: opts.force,
         explain: opts.explain,
+        dry_run: opts.dry_run,
         done: done.clone(),
         pending_state: None,
     };
+    if opts.dry_run {
+        println!("{name}:");
+    }
     // Effects (`cmd.*`, fs writes, `net.*`) are gated on the runtime phase;
     // only step execution — never top-level Takufile code — may perform them.
     taku_api::set_runtime(true);
@@ -445,6 +453,41 @@ task("build", {{
         });
         assert_eq!(lines("run.log"), 4);
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dry_run_touches_nothing() {
+        let dir = std::env::temp_dir().join(format!("taku-dry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Takufile.lua");
+        let d = dir.display();
+
+        let source = format!(
+            r#"
+task("t", {{
+    mkdir "{d}/made",
+    function(ctx) fs.write("{d}/from-fn.txt", "x") end,
+    "touch {d}/from-cmd",
+}})
+"#
+        );
+        run_task_body(
+            &path,
+            &source,
+            "t",
+            crate::test_apis(),
+            None,
+            &crate::RunOpts {
+                dry_run: true,
+                ..Default::default()
+            },
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(!dir.join("made").exists());
+        assert!(!dir.join("from-fn.txt").exists());
+        assert!(!dir.join("from-cmd").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

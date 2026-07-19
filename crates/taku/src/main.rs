@@ -63,6 +63,7 @@ fn run(cli: Cli) -> Result<(), taku_runtime::Error> {
             yes,
             force,
             explain,
+            dry_run,
         }) => {
             let vars = parse_vars(&vars)?;
             Runtime::load(APIS)?.run(
@@ -73,6 +74,7 @@ fn run(cli: Cli) -> Result<(), taku_runtime::Error> {
                     yes,
                     force,
                     explain,
+                    dry_run,
                 },
             )
         }
