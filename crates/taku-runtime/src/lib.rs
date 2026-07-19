@@ -3,6 +3,7 @@ mod dotenv;
 mod error;
 mod exec;
 mod fmtstr;
+mod incremental;
 mod plan;
 mod report;
 mod schedule;
@@ -29,6 +30,10 @@ pub struct RunOpts<'a> {
     pub vars: &'a [(String, String)],
     /// `--yes`: `confirm` steps answer themselves.
     pub yes: bool,
+    /// `--force`: `unchanged` guards rebuild regardless of the stored state.
+    pub force: bool,
+    /// `--explain`: print why an `unchanged` guard skipped or rebuilt.
+    pub explain: bool,
 }
 
 pub struct Runtime {

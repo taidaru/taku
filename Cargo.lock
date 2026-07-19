@@ -674,6 +674,7 @@ name = "taku-runtime"
 version = "0.1.4"
 dependencies = [
  "dotenvy",
+ "glob",
  "mlua",
  "taku-api",
  "taku-cmd",
@@ -681,6 +682,7 @@ dependencies = [
  "taku-fs",
  "taku-net",
  "taku-ops",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -859,6 +861,12 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "985eec839aaf2a1270af8f4ebcf63cf9401cfd90f0902f97c28d9f104ffbde72"
 
 [[package]]
 name = "zeroize"

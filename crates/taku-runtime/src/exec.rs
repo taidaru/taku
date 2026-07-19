@@ -19,8 +19,27 @@ pub(crate) type Done = Arc<Mutex<HashSet<String>>>;
 pub(crate) struct Ctx {
     pub dotenv: Arc<HashMap<String, String>>,
     pub vars: HashMap<String, String>,
+    /// Directory of the Takufile — the project root (`.taku/`, relative globs).
+    pub base: std::path::PathBuf,
     pub yes: bool,
+    pub force: bool,
+    pub explain: bool,
     pub done: Done,
+    /// State file to write after the task succeeds, set by an `unchanged`
+    /// guard that decided to run.
+    pub pending_state: Option<(std::path::PathBuf, [u8; 32])>,
+}
+
+impl Ctx {
+    pub fn format(&self, template: &str) -> Result<String, Error> {
+        format_step(template, &self.vars, &self.dotenv).map_err(Error::TaskFailed)
+    }
+}
+
+/// A step's verdict on the rest of the task.
+pub(crate) enum Flow {
+    Continue,
+    Skip,
 }
 
 /// Registry key holding the live `ctx.vars` table while a function-step runs,
@@ -109,10 +128,19 @@ pub(crate) fn run_steps(
 ) -> Result<(), Error> {
     let steps: Table = spec.get("steps")?;
     for (i, step) in steps.sequence_values::<Value>().enumerate() {
-        run_step(lua, apis, spec, step?, ctx).map_err(|e| match e {
+        let flow = run_step(lua, apis, spec, step?, ctx).map_err(|e| match e {
             Error::TaskFailed(msg) => Error::TaskFailed(format!("step {}: {msg}", i + 1)),
             other => other,
         })?;
+        if matches!(flow, Flow::Skip) {
+            return Ok(());
+        }
+    }
+    if let Some((path, state)) = ctx.pending_state.take() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, state)?;
     }
     Ok(())
 }
@@ -141,13 +169,14 @@ fn run_step(
     spec: &Table,
     step: Value,
     ctx: &mut Ctx,
-) -> Result<(), Error> {
+) -> Result<Flow, Error> {
+    let cont = |r: Result<(), Error>| r.map(|()| Flow::Continue);
     match step {
         // "cargo build ${target}" — a bare command template
         Value::String(s) => {
             let t = lua.create_table()?;
             t.set(1, s)?;
-            dispatch(lua, apis, "cmd", &t, ctx)
+            cont(dispatch(lua, apis, "cmd", &t, ctx))
         }
         // the imperative escape hatch: fn(ctx) with a live vars table
         Value::Function(f) => {
@@ -162,7 +191,7 @@ fn run_step(
             lua_ctx.set("task", spec)?;
             f.call::<()>(&lua_ctx)?;
             ctx.vars = table_to_vars(lua, &vars_t)?;
-            Ok(())
+            Ok(Flow::Continue)
         }
         Value::Table(t) => {
             let tag: Option<String> = t.get(TAG)?;
@@ -175,14 +204,19 @@ fn run_step(
                                 .to_string(),
                         ));
                     }
-                    dispatch(lua, apis, "cmd", &t, ctx)
+                    cont(dispatch(lua, apis, "cmd", &t, ctx))
                 }
-                // the one step the executor interprets itself: task recursion
+                // steps the executor interprets itself: task recursion and
+                // the incrementality guard
                 Some("invoke") => {
                     let name: String = t.get(1)?;
-                    run_invoke(lua, apis, &name, &t, ctx)
+                    cont(run_invoke(lua, apis, &name, &t, ctx))
                 }
-                Some(tag) => dispatch(lua, apis, tag, &t, ctx),
+                Some("unchanged") => match crate::incremental::check(spec, &t, ctx)? {
+                    crate::incremental::Decision::Skip => Ok(Flow::Skip),
+                    crate::incremental::Decision::Run => Ok(Flow::Continue),
+                },
+                Some(tag) => cont(dispatch(lua, apis, tag, &t, ctx)),
             }
         }
         other => Err(Error::TaskFailed(format!(
@@ -207,8 +241,12 @@ fn run_invoke(
     let mut sub = Ctx {
         dotenv: ctx.dotenv.clone(),
         vars: initial_vars(&spec)?,
+        base: ctx.base.clone(),
         yes: ctx.yes,
+        force: ctx.force,
+        explain: ctx.explain,
         done: ctx.done.clone(),
+        pending_state: None,
     };
     if let Some(vars) = t.get::<Option<Table>>("vars")? {
         for pair in vars.pairs::<String, String>() {

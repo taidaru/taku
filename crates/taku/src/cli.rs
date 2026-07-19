@@ -27,6 +27,14 @@ pub enum Command {
         /// Answer yes to every `confirm` step
         #[arg(short, long)]
         yes: bool,
+
+        /// Rebuild even when an `unchanged` guard says nothing changed
+        #[arg(short, long)]
+        force: bool,
+
+        /// Print why an `unchanged` guard skipped or rebuilt
+        #[arg(long)]
+        explain: bool,
     },
     #[command(visible_alias = "ls")]
     List,

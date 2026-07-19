@@ -69,7 +69,6 @@ pub(crate) fn execute(
                 let overrides = (name == target).then_some(overrides);
                 let name = name.to_string();
                 let done = done.clone();
-                let yes = opts.yes;
                 scope.spawn(move || {
                     let start = Instant::now();
                     let res = run_task(
@@ -79,7 +78,7 @@ pub(crate) fn execute(
                         &worker_style,
                         apis,
                         overrides,
-                        yes,
+                        opts,
                         &done,
                     );
                     let _ = tx.send((name, res, start.elapsed()));
@@ -136,10 +135,10 @@ fn run_task(
     style: &Style,
     apis: &'static [taku_api::ApiEntry],
     overrides: Option<&HashMap<String, String>>,
-    yes: bool,
+    opts: &crate::RunOpts,
     done: &crate::exec::Done,
 ) -> Result<(), String> {
-    let body = AssertUnwindSafe(|| run_task_body(path, source, name, apis, overrides, yes, done));
+    let body = AssertUnwindSafe(|| run_task_body(path, source, name, apis, overrides, opts, done));
     match catch_unwind(body) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(Error::Lua(e))) => Err(format!(
@@ -170,7 +169,7 @@ fn run_task_body(
     name: &str,
     apis: &'static [taku_api::ApiEntry],
     overrides: Option<&HashMap<String, String>>,
-    yes: bool,
+    opts: &crate::RunOpts,
     done: &crate::exec::Done,
 ) -> Result<(), Error> {
     // completed by any path already (e.g. `invoke`d by another task) — skip
@@ -194,8 +193,12 @@ fn run_task_body(
     let mut ctx = crate::exec::Ctx {
         dotenv,
         vars,
-        yes,
+        base: path.parent().map_or_else(|| ".".into(), Path::to_path_buf),
+        yes: opts.yes,
+        force: opts.force,
+        explain: opts.explain,
         done: done.clone(),
+        pending_state: None,
     };
     // Effects (`cmd.*`, fs writes, `net.*`) are gated on the runtime phase;
     // only step execution — never top-level Takufile code — may perform them.
@@ -233,7 +236,7 @@ mod tests {
             "t",
             crate::test_apis(),
             None,
-            false,
+            &Default::default(),
             &Default::default(),
         )
         .unwrap();
@@ -273,7 +276,7 @@ task("all: files", {{}})
             "files",
             crate::test_apis(),
             None,
-            false,
+            &Default::default(),
             &Default::default(),
         )
         .unwrap();
@@ -312,7 +315,7 @@ task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
             "t",
             crate::test_apis(),
             None,
-            false,
+            &Default::default(),
             &Default::default(),
         )
         .unwrap();
@@ -329,7 +332,7 @@ task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
             "o",
             crate::test_apis(),
             Some(&overrides),
-            false,
+            &Default::default(),
             &Default::default(),
         )
         .unwrap();
@@ -355,7 +358,20 @@ task("t1", {{ invoke "db-reset" }})
 "#
         );
         let done = crate::exec::Done::default();
-        run_task_body(&path, &source, "t1", crate::test_apis(), None, true, &done).unwrap();
+        let yes_opts = crate::RunOpts {
+            yes: true,
+            ..Default::default()
+        };
+        run_task_body(
+            &path,
+            &source,
+            "t1",
+            crate::test_apis(),
+            None,
+            &yes_opts,
+            &done,
+        )
+        .unwrap();
         assert!(done.lock().unwrap().contains("db-reset"));
 
         // the scheduler would now run db-reset as a dep — it must be a no-op
@@ -365,7 +381,7 @@ task("t1", {{ invoke "db-reset" }})
             "db-reset",
             crate::test_apis(),
             None,
-            true,
+            &yes_opts,
             &done,
         )
         .unwrap();
@@ -373,6 +389,62 @@ task("t1", {{ invoke "db-reset" }})
             std::fs::read_to_string(dir.join("log.txt")).unwrap(),
             "ran\n"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unchanged_guard_skips_reruns_on_input_change_and_obeys_force() {
+        let dir = std::env::temp_dir().join(format!("taku-inc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Takufile.lua");
+        let d = dir.display();
+        std::fs::write(dir.join("input.txt"), "one").unwrap();
+
+        let source = format!(
+            r#"
+task("build", {{
+    append {{ "pre", to = "{d}/pre.log" }},
+    unchanged {{ "input.txt", outputs = "out.txt" }},
+    append {{ "ran", to = "{d}/run.log" }},
+    write {{ "artifact", to = "{d}/out.txt" }},
+}})
+"#
+        );
+        let lines =
+            |file: &str| std::fs::read_to_string(dir.join(file)).map_or(0, |s| s.lines().count());
+        let run = |opts: &crate::RunOpts| {
+            run_task_body(
+                &path,
+                &source,
+                "build",
+                crate::test_apis(),
+                None,
+                opts,
+                &Default::default(),
+            )
+            .unwrap();
+        };
+
+        run(&Default::default()); // cold: everything runs, state recorded
+        assert_eq!((lines("pre.log"), lines("run.log")), (1, 1));
+
+        run(&Default::default()); // warm: pre-guard step runs, the rest skips
+        assert_eq!((lines("pre.log"), lines("run.log")), (2, 1));
+
+        std::fs::remove_file(dir.join("out.txt")).unwrap();
+        run(&Default::default()); // outputs missing: rebuild
+        assert_eq!(lines("run.log"), 2);
+
+        std::fs::write(dir.join("input.txt"), "two").unwrap();
+        run(&Default::default()); // input changed: rebuild
+        assert_eq!(lines("run.log"), 3);
+
+        run(&crate::RunOpts {
+            force: true,
+            ..Default::default()
+        });
+        assert_eq!(lines("run.log"), 4);
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

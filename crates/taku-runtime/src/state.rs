@@ -51,11 +51,7 @@ pub(crate) const RUNTIME_API: ApiEntry = ApiEntry {
         StepDef {
             tag: "unchanged",
             arg: Arg::Table,
-            run: |_, _, _| {
-                Err(mlua::Error::external(
-                    "'unchanged' steps are not implemented yet",
-                ))
-            },
+            run: |_, _, _| Err(mlua::Error::external("unchanged is handled by the runtime")),
         },
     ],
 };
