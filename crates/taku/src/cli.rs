@@ -19,6 +19,10 @@ pub enum Command {
         /// Maximum number of tasks to run in parallel (at least 1)
         #[arg(short, long, value_name = "N")]
         jobs: Option<NonZeroUsize>,
+
+        /// Set a task parameter declared in its header (repeatable)
+        #[arg(long, value_name = "KEY=VAL")]
+        vars: Vec<String>,
     },
     #[command(visible_alias = "ls")]
     List,

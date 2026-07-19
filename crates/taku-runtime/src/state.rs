@@ -125,11 +125,15 @@ fn register_builtins(lua: &Lua, ctx: &RegisterCtx) -> mlua::Result<()> {
     })?;
     lua.globals().set("raw", raw)?;
 
-    // fmt("..."): manual formatting inside function-steps.
-    // task vars are wired in with ctx later; env/.env works already.
+    // fmt("..."): manual formatting inside function-steps. Task vars come
+    // from the live ctx.vars table the executor publishes in the registry.
     let dotenv = ctx.dotenv.clone();
-    let fmt = lua.create_function(move |_, template: String| {
-        crate::exec::format_step(&template, &HashMap::new(), &dotenv)
+    let fmt = lua.create_function(move |lua, template: String| {
+        let vars = match lua.named_registry_value::<Table>(crate::exec::VARS_KEY) {
+            Ok(t) => crate::exec::table_to_vars(lua, &t)?,
+            Err(_) => HashMap::new(),
+        };
+        crate::exec::format_step(&template, &vars, &dotenv)
             .map_err(|e| mlua::Error::external(format!("fmt: {e}")))
     })?;
     lua.globals().set("fmt", fmt)?;

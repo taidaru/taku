@@ -62,6 +62,30 @@ pub(crate) fn parse_header(header: &str) -> Result<Header, String> {
     })
 }
 
+/// The nearest candidate within an edit distance of 2, for did-you-mean hints.
+pub(crate) fn closest<'a>(name: &str, candidates: &'a [String]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .map(|c| (levenshtein(name, c), c.as_str()))
+        .filter(|&(d, _)| d <= 2)
+        .min_by_key(|&(d, _)| d)
+        .map(|(_, c)| c)
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 /// A block of `---` lines directly above a
 /// `task("name ...")` line documents that task. The name is taken from the
 /// first string literal on the `task(` line (header part before `<`/`:`).

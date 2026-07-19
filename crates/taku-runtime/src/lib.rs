@@ -47,12 +47,31 @@ impl Runtime {
         })
     }
 
-    pub fn run(&self, command: &str, jobs: Option<NonZeroUsize>) -> Result<(), Error> {
+    /// `vars` are `--vars KEY=VAL` overrides for `command`'s declared params;
+    /// an unknown name is rejected with a did-you-mean hint.
+    pub fn run(
+        &self,
+        command: &str,
+        jobs: Option<NonZeroUsize>,
+        vars: &[(String, String)],
+    ) -> Result<(), Error> {
         let plan = plan::build(&self.lua, &self.path, command)?;
+        let tasks: Table = self.lua.named_registry_value(TASKS_KEY)?;
+        let spec: Table = tasks.get(command)?; // plan::build validated the name
+        let overrides = exec::validate_vars(&spec, vars)?;
         let style = report::Style::init();
 
         let start = Instant::now();
-        let ran = schedule::execute(&style, &self.path, &self.source, &plan, jobs, self.apis)?;
+        let ran = schedule::execute(
+            &style,
+            &self.path,
+            &self.source,
+            &plan,
+            jobs,
+            self.apis,
+            command,
+            &overrides,
+        )?;
         report::summary(&style, ran, start.elapsed());
         Ok(())
     }

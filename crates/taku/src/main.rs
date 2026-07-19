@@ -56,7 +56,10 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), taku_runtime::Error> {
     match cli.command {
         Some(Command::Init) => init(),
-        Some(Command::Run { task, jobs }) => Runtime::load(APIS)?.run(&task, jobs),
+        Some(Command::Run { task, jobs, vars }) => {
+            let vars = parse_vars(&vars)?;
+            Runtime::load(APIS)?.run(&task, jobs, &vars)
+        }
         Some(Command::List) => list(),
         None => {
             let _ = Cli::command().print_help();
@@ -64,6 +67,18 @@ fn run(cli: Cli) -> Result<(), taku_runtime::Error> {
             Ok(())
         }
     }
+}
+
+fn parse_vars(vars: &[String]) -> Result<Vec<(String, String)>, taku_runtime::Error> {
+    vars.iter()
+        .map(|kv| {
+            kv.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| {
+                    taku_runtime::Error::TaskFailed(format!("--vars expects KEY=VAL, got '{kv}'"))
+                })
+        })
+        .collect()
 }
 
 fn init() -> Result<(), taku_runtime::Error> {
