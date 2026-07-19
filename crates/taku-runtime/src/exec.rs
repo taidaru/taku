@@ -2,8 +2,8 @@
 //! data-step to the handler its API crate declared. Lua builds the plan at
 //! load time; this module performs it.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, Table, Value};
 use taku_api::ApiEntry;
@@ -12,9 +12,15 @@ use taku_api::steps::{StepCtx, StepFn, TAG};
 use crate::error::Error;
 use crate::state::{TASKS_KEY, all_apis};
 
+/// The run-scoped set of tasks that have completed by any path (scheduled or
+/// `invoke`d) — a later dep on one of them counts as satisfied.
+pub(crate) type Done = Arc<Mutex<HashSet<String>>>;
+
 pub(crate) struct Ctx {
     pub dotenv: Arc<HashMap<String, String>>,
     pub vars: HashMap<String, String>,
+    pub yes: bool,
+    pub done: Done,
 }
 
 /// Registry key holding the live `ctx.vars` table while a function-step runs,
@@ -124,6 +130,7 @@ fn dispatch(
         vars: &mut ctx.vars,
         dotenv: &ctx.dotenv,
         formatter: format_step,
+        yes: ctx.yes,
     };
     run(lua, t, &mut step_ctx).map_err(|e| Error::TaskFailed(e.to_string()))
 }
@@ -200,6 +207,8 @@ fn run_invoke(
     let mut sub = Ctx {
         dotenv: ctx.dotenv.clone(),
         vars: initial_vars(&spec)?,
+        yes: ctx.yes,
+        done: ctx.done.clone(),
     };
     if let Some(vars) = t.get::<Option<Table>>("vars")? {
         for pair in vars.pairs::<String, String>() {
@@ -208,7 +217,10 @@ fn run_invoke(
         }
     }
     run_steps(lua, apis, &spec, &mut sub)
-        .map_err(|e| Error::TaskFailed(format!("invoke '{name}': {e}")))
+        .map_err(|e| Error::TaskFailed(format!("invoke '{name}': {e}")))?;
+    // an invoke always runs, but its completion satisfies later deps
+    ctx.done.lock().unwrap().insert(name.to_string());
+    Ok(())
 }
 
 #[cfg(test)]

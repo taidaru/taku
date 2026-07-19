@@ -23,6 +23,10 @@ pub enum Command {
         /// Set a task parameter declared in its header (repeatable)
         #[arg(long, value_name = "KEY=VAL")]
         vars: Vec<String>,
+
+        /// Answer yes to every `confirm` step
+        #[arg(short, long)]
+        yes: bool,
     },
     #[command(visible_alias = "ls")]
     List,

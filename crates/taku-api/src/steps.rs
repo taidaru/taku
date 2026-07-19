@@ -37,6 +37,8 @@ pub struct StepCtx<'a> {
     pub vars: &'a mut HashMap<String, String>,
     pub dotenv: &'a HashMap<String, String>,
     pub formatter: FmtFn,
+    /// `--yes`: interactive confirmations answer themselves.
+    pub yes: bool,
 }
 
 impl StepCtx<'_> {

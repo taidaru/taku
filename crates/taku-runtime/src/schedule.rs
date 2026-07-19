@@ -19,11 +19,12 @@ pub(crate) fn execute(
     path: &Path,
     source: &str,
     plan: &Plan,
-    jobs: Option<NonZeroUsize>,
     apis: &'static [taku_api::ApiEntry],
     target: &str,
+    opts: &crate::RunOpts,
     overrides: &HashMap<String, String>,
 ) -> Result<usize, Error> {
+    let done = crate::exec::Done::default();
     let mut indegree: HashMap<&str, usize> = plan
         .deps
         .iter()
@@ -49,7 +50,8 @@ pub(crate) fn execute(
     roots.sort();
     let mut ready: VecDeque<&str> = roots.into();
 
-    let max = jobs
+    let max = opts
+        .jobs
         .or_else(|| std::thread::available_parallelism().ok())
         .map_or(1, NonZeroUsize::get);
     let mut running = 0;
@@ -66,9 +68,20 @@ pub(crate) fn execute(
                 // --vars targets only the task the user asked for, not deps
                 let overrides = (name == target).then_some(overrides);
                 let name = name.to_string();
+                let done = done.clone();
+                let yes = opts.yes;
                 scope.spawn(move || {
                     let start = Instant::now();
-                    let res = run_task(path, source, &name, &worker_style, apis, overrides);
+                    let res = run_task(
+                        path,
+                        source,
+                        &name,
+                        &worker_style,
+                        apis,
+                        overrides,
+                        yes,
+                        &done,
+                    );
                     let _ = tx.send((name, res, start.elapsed()));
                 });
                 running += 1;
@@ -115,6 +128,7 @@ pub(crate) fn execute(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_task(
     path: &Path,
     source: &str,
@@ -122,8 +136,10 @@ fn run_task(
     style: &Style,
     apis: &'static [taku_api::ApiEntry],
     overrides: Option<&HashMap<String, String>>,
+    yes: bool,
+    done: &crate::exec::Done,
 ) -> Result<(), String> {
-    let body = AssertUnwindSafe(|| run_task_body(path, source, name, apis, overrides));
+    let body = AssertUnwindSafe(|| run_task_body(path, source, name, apis, overrides, yes, done));
     match catch_unwind(body) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(Error::Lua(e))) => Err(format!(
@@ -154,7 +170,13 @@ fn run_task_body(
     name: &str,
     apis: &'static [taku_api::ApiEntry],
     overrides: Option<&HashMap<String, String>>,
+    yes: bool,
+    done: &crate::exec::Done,
 ) -> Result<(), Error> {
+    // completed by any path already (e.g. `invoke`d by another task) — skip
+    if done.lock().unwrap().contains(name) {
+        return Ok(());
+    }
     let (lua, dotenv) = build_state(path, source, false, apis)?;
     let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
     let spec: Table = tasks
@@ -169,13 +191,20 @@ fn run_task_body(
     if let Some(o) = overrides {
         vars.extend(o.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
-    let mut ctx = crate::exec::Ctx { dotenv, vars };
+    let mut ctx = crate::exec::Ctx {
+        dotenv,
+        vars,
+        yes,
+        done: done.clone(),
+    };
     // Effects (`cmd.*`, fs writes, `net.*`) are gated on the runtime phase;
     // only step execution — never top-level Takufile code — may perform them.
     taku_api::set_runtime(true);
     let result = crate::exec::run_steps(&lua, apis, &spec, &mut ctx);
     taku_api::set_runtime(false);
-    result
+    result?;
+    done.lock().unwrap().insert(name.to_string());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -198,7 +227,16 @@ mod tests {
         );
 
         let source = format!("task('t', {{ function() fs.mkdir('{sub}') end }})");
-        run_task_body(&path, &source, "t", crate::test_apis(), None).unwrap();
+        run_task_body(
+            &path,
+            &source,
+            "t",
+            crate::test_apis(),
+            None,
+            false,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(std::path::Path::new(&sub).is_dir());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -229,7 +267,16 @@ task("all: files", {{}})
         let plan = crate::plan::build(&lua, &path, "all").unwrap();
         assert_eq!(plan.deps["all"], ["files"]);
 
-        run_task_body(&path, &source, "files", crate::test_apis(), None).unwrap();
+        run_task_body(
+            &path,
+            &source,
+            "files",
+            crate::test_apis(),
+            None,
+            false,
+            &Default::default(),
+        )
+        .unwrap();
         let b = std::fs::read_to_string(dir.join("out/b.txt")).unwrap();
         assert_eq!(b, "hello greetingmore\n");
         assert!(dir.join("out/via-command").is_file());
@@ -259,7 +306,16 @@ task("t <sha=none>", {{
 task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
 "#
         );
-        run_task_body(&path, &source, "t", crate::test_apis(), None).unwrap();
+        run_task_body(
+            &path,
+            &source,
+            "t",
+            crate::test_apis(),
+            None,
+            false,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("fmt.txt")).unwrap(),
             "v=abc"
@@ -267,8 +323,56 @@ task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
         assert!(dir.join("f-abc").is_file());
 
         let overrides = HashMap::from([("x".to_string(), "b".to_string())]);
-        run_task_body(&path, &source, "o", crate::test_apis(), Some(&overrides)).unwrap();
+        run_task_body(
+            &path,
+            &source,
+            "o",
+            crate::test_apis(),
+            Some(&overrides),
+            false,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(dir.join("o-b").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_invoked_task_satisfies_a_later_dep_and_yes_answers_confirm() {
+        let dir = std::env::temp_dir().join(format!("taku-done-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Takufile.lua");
+        let d = dir.display();
+
+        let source = format!(
+            r#"
+task("db-reset", {{
+    confirm "wipe the db?",
+    append {{ "ran", to = "{d}/log.txt" }},
+}})
+
+task("t1", {{ invoke "db-reset" }})
+"#
+        );
+        let done = crate::exec::Done::default();
+        run_task_body(&path, &source, "t1", crate::test_apis(), None, true, &done).unwrap();
+        assert!(done.lock().unwrap().contains("db-reset"));
+
+        // the scheduler would now run db-reset as a dep — it must be a no-op
+        run_task_body(
+            &path,
+            &source,
+            "db-reset",
+            crate::test_apis(),
+            None,
+            true,
+            &done,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("log.txt")).unwrap(),
+            "ran\n"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

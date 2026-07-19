@@ -56,9 +56,21 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), taku_runtime::Error> {
     match cli.command {
         Some(Command::Init) => init(),
-        Some(Command::Run { task, jobs, vars }) => {
+        Some(Command::Run {
+            task,
+            jobs,
+            vars,
+            yes,
+        }) => {
             let vars = parse_vars(&vars)?;
-            Runtime::load(APIS)?.run(&task, jobs, &vars)
+            Runtime::load(APIS)?.run(
+                &task,
+                &taku_runtime::RunOpts {
+                    jobs,
+                    vars: &vars,
+                    yes,
+                },
+            )
         }
         Some(Command::List) => list(),
         None => {

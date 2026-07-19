@@ -20,6 +20,17 @@ pub use error::Error;
 
 use state::{TASKS_KEY, build_state, find_takufile};
 
+/// Options for [`Runtime::run`], settable from the CLI.
+#[derive(Default)]
+pub struct RunOpts<'a> {
+    /// Maximum number of tasks to run in parallel.
+    pub jobs: Option<NonZeroUsize>,
+    /// `--vars KEY=VAL` overrides for the target task's declared params.
+    pub vars: &'a [(String, String)],
+    /// `--yes`: `confirm` steps answer themselves.
+    pub yes: bool,
+}
+
 pub struct Runtime {
     lua: Lua,
     path: PathBuf,
@@ -47,18 +58,12 @@ impl Runtime {
         })
     }
 
-    /// `vars` are `--vars KEY=VAL` overrides for `command`'s declared params;
-    /// an unknown name is rejected with a did-you-mean hint.
-    pub fn run(
-        &self,
-        command: &str,
-        jobs: Option<NonZeroUsize>,
-        vars: &[(String, String)],
-    ) -> Result<(), Error> {
+    /// An unknown `--vars` name is rejected with a did-you-mean hint.
+    pub fn run(&self, command: &str, opts: &RunOpts) -> Result<(), Error> {
         let plan = plan::build(&self.lua, &self.path, command)?;
         let tasks: Table = self.lua.named_registry_value(TASKS_KEY)?;
         let spec: Table = tasks.get(command)?; // plan::build validated the name
-        let overrides = exec::validate_vars(&spec, vars)?;
+        let overrides = exec::validate_vars(&spec, opts.vars)?;
         let style = report::Style::init();
 
         let start = Instant::now();
@@ -67,9 +72,9 @@ impl Runtime {
             &self.path,
             &self.source,
             &plan,
-            jobs,
             self.apis,
             command,
+            opts,
             &overrides,
         )?;
         report::summary(&style, ran, start.elapsed());

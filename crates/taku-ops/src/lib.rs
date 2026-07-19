@@ -1,6 +1,6 @@
 //! Simple built-in operators
 
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 
 use taku_api::steps::{Arg, StepDef};
 
@@ -19,7 +19,15 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
         StepDef {
             tag: "confirm",
             arg: Arg::Str,
-            run: |_, t, ctx| confirm(&ctx.fmt_value(t.get(1)?)?),
+            run: |_, t, ctx| {
+                let msg = ctx.fmt_value(t.get(1)?)?;
+                // --yes, or no terminal to ask on (CI): auto-confirm
+                if ctx.yes || !std::io::stdin().is_terminal() {
+                    println!("{msg} [y/N] yes (auto)");
+                    return Ok(());
+                }
+                confirm(&msg)
+            },
         },
     ],
 };
