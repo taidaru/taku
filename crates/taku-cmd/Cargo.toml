@@ -1,11 +1,11 @@
 [package]
-name = "taku-ssh"
+name = "taku-cmd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "SSH remote-execution API for taku."
+description = "Process-execution API for taku."
 publish = false
 
 [lints]
@@ -14,7 +14,4 @@ workspace = true
 [dependencies]
 mlua.workspace = true
 taku-api.workspace = true
-taku-shell.workspace = true
-taku-fs.workspace = true
-taku-net.workspace = true
-taku-env.workspace = true
+shlex = "1"

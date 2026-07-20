@@ -15,7 +15,7 @@ pub enum Error {
     TaskFailed(String),
     Io(std::io::Error),
     Lua(mlua::Error),
-    Dotenv(taku_env::DotenvError),
+    Dotenv(dotenvy::Error),
 }
 
 impl fmt::Display for Error {
@@ -59,8 +59,8 @@ impl From<mlua::Error> for Error {
     }
 }
 
-impl From<taku_env::DotenvError> for Error {
-    fn from(e: taku_env::DotenvError) -> Self {
+impl From<dotenvy::Error> for Error {
+    fn from(e: dotenvy::Error) -> Self {
         Error::Dotenv(e)
     }
 }

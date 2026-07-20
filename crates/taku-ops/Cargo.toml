@@ -1,11 +1,11 @@
 [package]
-name = "taku-shell"
+name = "taku-ops"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Process-execution API for taku."
+description = "Simple built-in operators"
 publish = false
 
 [lints]

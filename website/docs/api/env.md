@@ -32,6 +32,6 @@ with `${VAR}`: the real environment is consulted first, then variables defined
 earlier in the same file; single-quoted values are taken literally. The file is
 never written to and is only read on this machine.
 
-Inside [`ssh.on`](ssh), the same local `.env` is also consulted as a fallback for
-remote lookups — the remote host's real environment still takes precedence, and
-the fallback is resolved locally, so nothing from your `.env` is sent to the host.
+The same lookup backs `$NAME` / `${$NAME}` placeholders in step templates, and
+every step-spawned process gets `.env` values for variables the environment
+leaves unset.

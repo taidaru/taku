@@ -1,23 +1,31 @@
 # fs — файловая система
 
+Доступ к файловой системе для `function(ctx)`-шагов. Про файловые операции как
+шаги таска (`rm`, `mkdir`, `cp`, `mv`, `write`, `append`) см.
+[Шаги](../guide/steps.md).
+
 ```lua
-fs.write("out.txt", "привет")
-local text = fs.read("out.txt")
-for _, name in ipairs(fs.read_dir(".")) do print(name) end
+function(ctx)
+    local text = fs.read("Cargo.toml")
+    fs.write("out.txt", text)
+    for _, path in ipairs(fs.glob("src/**/*.rs")) do print(path) end
+end
 ```
 
 | Функция | Результат |
 |---|---|
 | `fs.read(path)` | содержимое файла (байты) |
-| `fs.write(path, data)` | записать `data`, создав/обрезав файл |
-| `fs.append(path, data)` | дописать `data`, создав файл при необходимости |
+| `fs.write(path, data)` | записать `data`, создавая/усекая |
+| `fs.append(path, data)` | дописать `data`, создав при необходимости |
 | `fs.exists(path)` | `true` / `false` |
 | `fs.is_file(path)` | `true` / `false` |
 | `fs.is_dir(path)` | `true` / `false` |
-| `fs.mkdir(path)` | создать каталог и родительские |
-| `fs.remove(path)` | удалить файл или каталог рекурсивно |
-| `fs.copy(src, dst)` | скопировать файл |
-| `fs.rename(src, dst)` | переместить / переименовать |
-| `fs.read_dir(path)` | список имён в каталоге, отсортирован |
+| `fs.mkdir(path)` | создать каталог и родителей |
+| `fs.rm(path)` | удалить файл или каталог рекурсивно |
+| `fs.cp(src, dst)` | скопировать файл |
+| `fs.mv(src, dst)` | переместить / переименовать |
+| `fs.ls(path)` | имена записей, отсортированы |
+| `fs.glob(pattern)` | подходящие пути, отсортированы; `**` рекурсивен |
 
-Содержимое — байтовые строки, поэтому бинарные файлы проходят без искажений.
+Содержимое — байтовые строки, бинарные файлы проходят без искажений. Чтения
+работают и при загрузке; записи требуют исполняющегося таска.

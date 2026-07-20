@@ -23,6 +23,26 @@ pub(crate) fn build(lua: &Lua, takufile: &Path, command: &str) -> Result<Plan, E
     Ok(Plan { tasks: names, deps })
 }
 
+/// Pretty execution graph.
+pub(crate) fn render(plan: &Plan, root: &str) -> String {
+    fn walk(name: &str, prefix: &str, deps: &HashMap<String, Vec<String>>, out: &mut String) {
+        let ds = deps.get(name).map(Vec::as_slice).unwrap_or_default();
+        for (i, dep) in ds.iter().enumerate() {
+            let last = i + 1 == ds.len();
+            out.push_str(prefix);
+            out.push_str(if last { "└─ " } else { "├─ " });
+            out.push_str(dep);
+            out.push('\n');
+            let child_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
+            walk(dep, &child_prefix, deps, out);
+        }
+    }
+
+    let mut out = format!("{root}\n");
+    walk(root, "", &plan.deps, &mut out);
+    out
+}
+
 fn collect(
     tasks: &Table,
     takufile: &Path,
@@ -113,6 +133,16 @@ mod tests {
     fn ignores_tasks_outside_the_requested_subgraph() {
         let plan = build_for(&[("a", &["b"]), ("b", &[]), ("unrelated", &[])], "a").unwrap();
         assert_eq!(plan.tasks, ["a", "b"]);
+    }
+
+    #[test]
+    fn render_draws_a_tree_from_the_target() {
+        let plan = build_for(
+            &[("a", &["b", "c"]), ("b", &["d"]), ("c", &["d"]), ("d", &[])],
+            "a",
+        )
+        .unwrap();
+        assert_eq!(render(&plan, "a"), "a\n├─ b\n│  └─ d\n└─ c\n   └─ d\n");
     }
 
     #[test]

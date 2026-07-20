@@ -9,41 +9,65 @@ use taku_runtime::Runtime;
 
 use cli::{Cli, Command};
 
+/// The full API registry: every crate the sandbox exposes to a Takufile.
+/// The runtime depends only on taku-api; this list is the single place the
+/// concrete crates are wired in.
+static APIS: &[taku_api::ApiEntry] = &[
+    taku_fs::API,
+    taku_cmd::API,
+    taku_net::API,
+    taku_env::API,
+    taku_ops::API,
+];
+
 const TEMPLATE: &str = r#"-- Takufile.lua — tasks for this project, written in Lua.
 --
--- Run a task with `taku run <name>`; list tasks with `taku list`.
--- Tasks may declare dependencies; independent ones run in parallel.
+-- A task is a list of steps: command strings, step constructors (rm, cp,
+-- write, unchanged, serve, ...), or an escape-hatch `function(ctx)`.
+-- The header is "name <param=default>: dep1 dep2".
+--
+--   taku list            all tasks with their short docs
+--   taku run <task>      run it (--dry-run to preview, --vars k=v to set params)
 --
 -- API reference & docs: https://taidaru.github.io/taku/
 
-task("hello", function()
-    print("Hello from taku!")
-end)
+--- say hello
+task "hello <name=world>" {
+    echo "Hello, ${name}!",
+}
 
-task("build", {
-    desc = "build the project",
-    run = function()
-        -- Commands are argument lists, run directly (no shell): { "prog", "arg", ... }.
-        -- For example:
-        --   local code = sh.run({ "cargo", "build" })
-        --   if code ~= 0 then
-        --       error("build failed (exit " .. code .. ")")
-        --   end
-        print("replace me with your build command")
-    end,
-})
+--- build the project
+--- skips itself when the inputs did not change
+task "build" {
+    unchanged { "src/**", outputs = "target" },
+    "echo replace me with your build command",
+}
+
+--- run the test suite
+task "test: build" {
+    "echo replace me with your test command",
+}
+
+--- wipe and reseed the local database
+task "db-reset" {
+    confirm "wipe the local database?",
+    "echo replace me with your db reset command",
+}
+
+--- start the dev server, wait until it answers
+task "api" {
+    serve {
+        "echo replace me with your server command",
+        -- ready = { http = "http://127.0.0.1:8000/health", timeout = 10 },
+    },
+}
+
+--- everything a dev session needs
+task "dev: build api" {}
 "#;
 
 fn main() -> ExitCode {
     console::init();
-
-    // When `ssh` needs a password and there is no tty, it runs this binary as its
-    // SSH_ASKPASS helper: `taku "<prompt>"`. Echo the password (passed out-of-band
-    // via a private env var, never argv) and exit before clap sees the prompt.
-    if let Some(password) = askpass_password() {
-        println!("{password}");
-        return ExitCode::SUCCESS;
-    }
 
     let cli = Cli::parse();
 
@@ -56,25 +80,31 @@ fn main() -> ExitCode {
     }
 }
 
-/// Detects the askpass invocation strictly: the password env var alone must
-/// not hijack the CLI (a lingering `export TAKU_ASKPASS_PASSWORD=...` would
-/// make every `taku` run print the secret and exit). Only respond when ssh is
-/// really calling us as its helper: exactly one argument (the prompt) and
-/// SSH_ASKPASS naming this very binary.
-fn askpass_password() -> Option<String> {
-    let password = std::env::var(taku_runtime::ASKPASS_PASSWORD_ENV).ok()?;
-    if std::env::args_os().len() != 2 {
-        return None;
-    }
-    let helper = std::env::var_os("SSH_ASKPASS")?;
-    let me = std::env::current_exe().ok()?;
-    (Path::new(&helper) == me).then_some(password)
-}
-
 fn run(cli: Cli) -> Result<(), taku_runtime::Error> {
     match cli.command {
         Some(Command::Init) => init(),
-        Some(Command::Run { task, jobs }) => Runtime::load()?.run(&task, jobs),
+        Some(Command::Run {
+            task,
+            jobs,
+            vars,
+            yes,
+            force,
+            explain,
+            dry_run,
+        }) => {
+            let vars = parse_vars(&vars)?;
+            Runtime::load(APIS)?.run(
+                &task,
+                &taku_runtime::RunOpts {
+                    jobs,
+                    vars: &vars,
+                    yes,
+                    force,
+                    explain,
+                    dry_run,
+                },
+            )
+        }
         Some(Command::List) => list(),
         None => {
             let _ = Cli::command().print_help();
@@ -82,6 +112,18 @@ fn run(cli: Cli) -> Result<(), taku_runtime::Error> {
             Ok(())
         }
     }
+}
+
+fn parse_vars(vars: &[String]) -> Result<Vec<(String, String)>, taku_runtime::Error> {
+    vars.iter()
+        .map(|kv| {
+            kv.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| {
+                    taku_runtime::Error::TaskFailed(format!("--vars expects KEY=VAL, got '{kv}'"))
+                })
+        })
+        .collect()
 }
 
 fn init() -> Result<(), taku_runtime::Error> {
@@ -99,7 +141,7 @@ fn init() -> Result<(), taku_runtime::Error> {
 }
 
 fn list() -> Result<(), taku_runtime::Error> {
-    let tasks = Runtime::load()?.list()?;
+    let tasks = Runtime::load(APIS)?.list()?;
     if tasks.is_empty() {
         println!("no tasks defined in the Takufile");
         return Ok(());

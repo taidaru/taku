@@ -29,3 +29,9 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 taku-runtime.workspace = true
+taku-api.workspace = true
+taku-fs.workspace = true
+taku-cmd.workspace = true
+taku-net.workspace = true
+taku-env.workspace = true
+taku-ops.workspace = true

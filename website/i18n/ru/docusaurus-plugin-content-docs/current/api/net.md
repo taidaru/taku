@@ -1,22 +1,25 @@
 # net — сеть
 
-HTTP реализован через [`ureq`](https://docs.rs/ureq) (HTTP/1.1, редиректы, gzip и
-TLS через rustls — без системного OpenSSL).
+Сетевой доступ для `function(ctx)`-шагов. Про скачивание как шаг таска см.
+шаг `download` в [Шагах](../guide/steps.md).
+
+HTTP обслуживает [`ureq`](https://docs.rs/ureq): HTTP/1.1, редиректы, gzip,
+TLS через rustls — системный OpenSSL не нужен.
 
 ```lua
-local body = net.http_get("https://example.com/")
-net.download(
-    "https://github.com/taidaru/taku/releases/download/v0.1.2-alpha/taku-x86_64-unknown-linux-gnu.tar.gz",
-    "taku.tar.gz"
-)
+function(ctx)
+    local body = net.get("https://api.example.com/version")
+    net.download("https://example.com/tool.tar.gz", "vendor/tool.tar.gz")
+end
 ```
 
 | Функция | Результат |
 |---|---|
-| `net.http_get(url)` | тело ответа (байты); `http://` и `https://` |
-| `net.download(url, path)` | скачать `url`, записать тело в `path` |
-| `net.tcp_request(host, port, data)` | сырой TCP: отправить `data`, прочитать весь ответ |
+| `net.get(url)` | тело ответа (байты); `http://` и `https://` |
+| `net.download(url, path [, sha256])` | записать тело в `path` потоково; сверить хэш, если задан |
+| `net.tcp(host, port, data)` | сырой TCP: отправить `data`, вернуть весь ответ |
 
-HTTP-статус не из диапазона 2xx бросает ошибку. `http_get` буферизует тело в
-памяти и ограничивает его 64 МиБ; `download` пишет потоково на диск и допускает
-до 8 ГиБ. Таймаут запросов — 30 секунд.
+- Не-2xx HTTP-статус — ошибка.
+- `get` буферизует в памяти с потолком 64 МиБ; `download` пишет на диск, до
+  8 ГиБ. При несовпадении `sha256` файл удаляется и поднимается ошибка.
+- Таймаут запросов — 30 секунд.

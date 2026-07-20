@@ -14,8 +14,14 @@ workspace = true
 [dependencies]
 mlua.workspace = true
 taku-api.workspace = true
+dotenvy = "0.15"
+glob = "0.3"
+shlex = "1"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+[dev-dependencies]
 taku-fs.workspace = true
-taku-shell.workspace = true
-taku-env.workspace = true
+taku-cmd.workspace = true
 taku-net.workspace = true
-taku-ssh.workspace = true
+taku-env.workspace = true
+taku-ops.workspace = true

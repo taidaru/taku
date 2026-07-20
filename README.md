@@ -14,8 +14,10 @@ API for interacting with the operating system.
 * **Cross-platform** — the same Takufile works on Linux, macOS, and Windows.
 * **Sandboxed runtime** — standard Lua `io` and `os` libraries are unavailable;
   tasks interact with the system only through Taku's APIs.
-* **Built-in APIs** — filesystem, processes, networking, SSH, and environment
-  variables.
+* **Plan, not script** — a task is a list of steps the runner executes; preview
+  it with `--dry-run`, skip unchanged work with the `unchanged` guard.
+* **Built-in steps & APIs** — commands, filesystem, networking, environment
+  variables, confirmations, and long-lived dev services (`serve`).
 * **Parallel execution** — independent tasks run concurrently.
 
 ## Documentation
@@ -60,35 +62,29 @@ Prebuilt archives and `.msi` installers are also on the [GitHub releases](https:
 ## Example
 
 ```lua
-task("build", {
-    desc = "compile the project",
-    run = function()
-        if sh.run({ "cargo", "build" }) ~= 0 then
-            error("build failed")
-        end
-    end,
-})
+--- generate sources
+task "gen" {
+    write { "1.0.0", to = "version.txt" },
+}
 
-task("test", {
-    desc = "run tests",
-    deps = { "build" },
-    run = function()
-        sh.run({ "cargo", "test" })
-    end,
-})
+--- build the project (skips itself when the inputs did not change)
+task "build: gen" {
+    unchanged { "src/**/*.rs", outputs = "target" },
+    "cargo build",
+}
 
-task("lint", {
-    desc = "run clippy",
-    run = function()
-        sh.run({ "cargo", "clippy" })
-    end,
-})
+--- run tests
+task "test: build" {
+    "cargo test",
+}
 
-task("check", {
-    desc = "run all checks",
-    deps = { "test", "lint" },
-    run = function() end, -- run is required
-})
+--- run clippy
+task "lint: build" {
+    "cargo clippy",
+}
+
+--- run all checks
+task "check: test lint" {}
 ```
 
 Running
@@ -97,30 +93,37 @@ Running
 taku run check
 ```
 
-first builds the project, then runs **test** and **lint** in parallel.
+first runs **gen** and **build**, then **test** and **lint** in parallel.
+A task header is `"name <param=default>: deps"`; `${param}` placeholders and
+`$ENV_VAR` references are resolved by the runner, and a bare string step is a
+command (tokenized, no shell involved).
 
 ## Usage
 
 ```sh
-taku init              # create a starter Takufile.lua
-taku list              # list available tasks (alias: ls)
-taku run <task>        # run a task and its dependencies (alias: r)
-taku run <task> -j N   # limit parallelism (default: CPU count)
+taku init                     # create a starter Takufile.lua
+taku list                     # list tasks with their docs (alias: ls)
+taku run <task>               # run a task and its dependencies (alias: r)
+taku run <task> --dry-run     # print the plan without executing anything
+taku run <task> --vars k=v    # set a task parameter
+taku run <task> --force       # ignore `unchanged` state and rebuild
+taku run <task> --explain     # say why a guard skipped or rebuilt
+taku run <task> --yes         # auto-answer `confirm` steps
+taku run <task> -j N          # limit parallelism (default: CPU count)
 ```
 
 Taku looks for `Takufile.lua` in the current directory.
 
-With `-j` above 1 (the default is the CPU count), the output of parallel tasks
-is interleaved; pass `-j 1` for strictly sequential output.
-
 ## Available APIs
 
-The sandbox exposes only Taku's APIs:
+Bare verbs in a task body build **steps** (executed by the runner): commands,
+`argv`/`pipe`, `rm`/`mkdir`/`cp`/`mv`/`write`/`append`, `download`, `echo`,
+`confirm`, `invoke`, `unchanged`, `serve`. Inside `function(ctx)` steps the
+module APIs perform effects directly:
 
+* `cmd` — run processes (`run`, `try`, `capture`)
 * `fs` — filesystem operations
-* `sh` — execute processes
 * `net` — networking
-* `ssh` — remote execution over SSH
 * `env` — environment variables (with `.env` autoloading)
 
 Standard Lua `io` and `os` libraries are disabled.
@@ -139,10 +142,10 @@ The workspace consists of:
 * `taku-runtime` — Lua runtime and task scheduler
 * `taku-api` — shared registration plumbing for the API crates
 * `taku-fs`
-* `taku-shell`
+* `taku-cmd`
 * `taku-net`
-* `taku-ssh`
 * `taku-env`
+* `taku-ops`
 
 ## FAQ
 
@@ -158,7 +161,7 @@ Only to the same extent as running a Makefile or a shell script.
 The Lua runtime is sandboxed: standard libraries such as `io` and `os` are
 disabled, and tasks can only access the operating system through Taku's APIs.
 However, those APIs are intentionally capable of executing commands, modifying
-files, accessing the network, or connecting over SSH.
+files, and accessing the network.
 
 Always review an untrusted `Takufile.lua` before running it.
 

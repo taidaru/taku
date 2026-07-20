@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 authors = ["taidaru"]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/taidaru/taku"
@@ -32,8 +32,8 @@ taku-runtime = { path = "crates/taku-runtime" }
 taku-api = { path = "crates/taku-api" }
 taku-fs = { path = "crates/taku-fs" }
 taku-net = { path = "crates/taku-net" }
-taku-shell = { path = "crates/taku-shell" }
-taku-ssh = { path = "crates/taku-ssh" }
+taku-cmd = { path = "crates/taku-cmd" }
+taku-ops = { path = "crates/taku-ops" }
 taku-env = { path = "crates/taku-env" }
 
 [profile.release]

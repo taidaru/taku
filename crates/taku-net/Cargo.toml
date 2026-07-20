@@ -15,3 +15,4 @@ workspace = true
 mlua.workspace = true
 taku-api.workspace = true
 ureq = "3.3.0"
+sha2 = "0.10"
