@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "taku"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "taku-api",
@@ -620,14 +620,14 @@ dependencies = [
 
 [[package]]
 name = "taku-api"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "mlua",
 ]
 
 [[package]]
 name = "taku-cmd"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "mlua",
  "shlex 1.3.0",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "taku-env"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "mlua",
  "taku-api",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "taku-fs"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "glob",
  "mlua",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "taku-net"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "mlua",
  "sha2",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "taku-ops"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "mlua",
  "taku-api",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "taku-runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "dotenvy",
  "glob",
