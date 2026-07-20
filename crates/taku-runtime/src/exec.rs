@@ -26,6 +26,7 @@ pub(crate) struct Ctx {
     pub explain: bool,
     pub dry_run: bool,
     pub done: Done,
+    pub services: crate::serve::Services,
     /// State file to write after the task succeeds, set by an `unchanged`
     /// guard that decided to run.
     pub pending_state: Option<(std::path::PathBuf, [u8; 32])>,
@@ -128,8 +129,9 @@ pub(crate) fn run_steps(
     ctx: &mut Ctx,
 ) -> Result<(), Error> {
     let steps: Table = spec.get("steps")?;
+    let len = steps.raw_len();
     for (i, step) in steps.sequence_values::<Value>().enumerate() {
-        let flow = run_step(lua, apis, spec, step?, ctx).map_err(|e| match e {
+        let flow = run_step(lua, apis, spec, step?, ctx, i + 1 == len).map_err(|e| match e {
             Error::TaskFailed(msg) => Error::TaskFailed(format!("step {}: {msg}", i + 1)),
             other => other,
         })?;
@@ -170,6 +172,7 @@ fn run_step(
     spec: &Table,
     step: Value,
     ctx: &mut Ctx,
+    last: bool,
 ) -> Result<Flow, Error> {
     if ctx.dry_run {
         return dry_step(lua, apis, spec, step, ctx);
@@ -220,6 +223,14 @@ fn run_step(
                     crate::incremental::Decision::Skip => Ok(Flow::Skip),
                     crate::incremental::Decision::Run => Ok(Flow::Continue),
                 },
+                Some("serve") => {
+                    if !last {
+                        return Err(Error::TaskFailed(
+                            "'serve' must be the last step of a task".to_string(),
+                        ));
+                    }
+                    cont(crate::serve::run(spec, &t, ctx))
+                }
                 Some(tag) => cont(dispatch(lua, apis, tag, &t, ctx)),
             }
         }
@@ -324,6 +335,7 @@ fn run_invoke(
         explain: ctx.explain,
         dry_run: ctx.dry_run,
         done: ctx.done.clone(),
+        services: ctx.services.clone(),
         pending_state: None,
     };
     if let Some(vars) = t.get::<Option<Table>>("vars")? {

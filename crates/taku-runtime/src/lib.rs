@@ -7,6 +7,7 @@ mod incremental;
 mod plan;
 mod report;
 mod schedule;
+mod serve;
 mod state;
 mod taskdef;
 
@@ -75,6 +76,7 @@ impl Runtime {
         if opts.dry_run {
             println!("{}", plan::render(&plan, command));
         }
+        let hold = service_graph(&self.lua, &plan)?;
         let style = report::Style::init();
 
         let start = Instant::now();
@@ -87,6 +89,7 @@ impl Runtime {
             command,
             opts,
             &overrides,
+            hold,
         )?;
         report::summary(&style, ran, start.elapsed());
         Ok(())
@@ -105,6 +108,28 @@ impl Runtime {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
+}
+
+/// True when every task in the plan is a service (its last step is `serve`)
+/// or a bare aggregator (no steps, deps only).
+fn service_graph(lua: &Lua, plan: &plan::Plan) -> Result<bool, Error> {
+    let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
+    for name in &plan.tasks {
+        let spec: Table = tasks.get(name.as_str())?;
+        let steps: Table = spec.get("steps")?;
+        let len = steps.raw_len();
+        if len == 0 {
+            continue;
+        }
+        let last: mlua::Value = steps.raw_get(len)?;
+        let is_serve = matches!(&last, mlua::Value::Table(t)
+            if t.get::<Option<String>>(taku_api::steps::TAG).ok().flatten().as_deref()
+                == Some("serve"));
+        if !is_serve {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn format_error(error: &Error) -> String {

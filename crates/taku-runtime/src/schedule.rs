@@ -23,8 +23,10 @@ pub(crate) fn execute(
     target: &str,
     opts: &crate::RunOpts,
     overrides: &HashMap<String, String>,
+    hold: bool,
 ) -> Result<usize, Error> {
     let done = crate::exec::Done::default();
+    let services = crate::serve::Services::default();
     let mut indegree: HashMap<&str, usize> = plan
         .deps
         .iter()
@@ -73,6 +75,7 @@ pub(crate) fn execute(
                 let overrides = (name == target).then_some(overrides);
                 let name = name.to_string();
                 let done = done.clone();
+                let services = services.clone();
                 scope.spawn(move || {
                     let start = Instant::now();
                     let res = run_task(
@@ -84,6 +87,7 @@ pub(crate) fn execute(
                         overrides,
                         opts,
                         &done,
+                        &services,
                     );
                     let _ = tx.send((name, res, start.elapsed()));
                 });
@@ -125,6 +129,33 @@ pub(crate) fn execute(
         }
     });
 
+    // services outlive the graph: hold them when the whole graph is services
+    // (Ctrl+C reaches the process group, taking the children down with us),
+    // otherwise tear them down now that their dependents are done. Either
+    // way a service that exited with an error fails the run — and one
+    // failure brings every other service down.
+    if crate::serve::any_running(&services) {
+        if hold && first_err.is_none() {
+            println!("taku: services running — press Ctrl+C to stop");
+            loop {
+                std::thread::sleep(Duration::from_millis(300));
+                if let Some(failure) = crate::serve::reap_failure(&services) {
+                    first_err = Some(Error::TaskFailed(failure));
+                    break;
+                }
+                if !crate::serve::any_running(&services) {
+                    break; // every service exited cleanly
+                }
+            }
+        }
+        if first_err.is_none()
+            && let Some(failure) = crate::serve::reap_failure(&services)
+        {
+            first_err = Some(Error::TaskFailed(failure));
+        }
+        crate::serve::kill_all(&services);
+    }
+
     match first_err {
         Some(e) => Err(e),
         None => Ok(plan.tasks.len()),
@@ -141,8 +172,11 @@ fn run_task(
     overrides: Option<&HashMap<String, String>>,
     opts: &crate::RunOpts,
     done: &crate::exec::Done,
+    services: &crate::serve::Services,
 ) -> Result<(), String> {
-    let body = AssertUnwindSafe(|| run_task_body(path, source, name, apis, overrides, opts, done));
+    let body = AssertUnwindSafe(|| {
+        run_task_body(path, source, name, apis, overrides, opts, done, services)
+    });
     match catch_unwind(body) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(Error::Lua(e))) => Err(format!(
@@ -167,6 +201,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_task_body(
     path: &Path,
     source: &str,
@@ -175,6 +210,7 @@ fn run_task_body(
     overrides: Option<&HashMap<String, String>>,
     opts: &crate::RunOpts,
     done: &crate::exec::Done,
+    services: &crate::serve::Services,
 ) -> Result<(), Error> {
     // completed by any path already (e.g. `invoke`d by another task) — skip
     if done.lock().unwrap().contains(name) {
@@ -203,6 +239,7 @@ fn run_task_body(
         explain: opts.explain,
         dry_run: opts.dry_run,
         done: done.clone(),
+        services: services.clone(),
         pending_state: None,
     };
     if opts.dry_run {
@@ -246,6 +283,7 @@ mod tests {
             None,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert!(std::path::Path::new(&sub).is_dir());
@@ -284,6 +322,7 @@ task("all: files", {{}})
             "files",
             crate::test_apis(),
             None,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         )
@@ -325,6 +364,7 @@ task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
             None,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert_eq!(
@@ -340,6 +380,7 @@ task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
             "o",
             crate::test_apis(),
             Some(&overrides),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         )
@@ -378,6 +419,7 @@ task("t1", {{ invoke "db-reset" }})
             None,
             &yes_opts,
             &done,
+            &Default::default(),
         )
         .unwrap();
         assert!(done.lock().unwrap().contains("db-reset"));
@@ -391,6 +433,7 @@ task("t1", {{ invoke "db-reset" }})
             None,
             &yes_opts,
             &done,
+            &Default::default(),
         )
         .unwrap();
         assert_eq!(
@@ -428,6 +471,7 @@ task("build", {{
                 crate::test_apis(),
                 None,
                 opts,
+                &Default::default(),
                 &Default::default(),
             )
             .unwrap();
@@ -483,11 +527,79 @@ task("t", {{
                 ..Default::default()
             },
             &Default::default(),
+            &Default::default(),
         )
         .unwrap();
         assert!(!dir.join("made").exists());
         assert!(!dir.join("from-fn.txt").exists());
         assert!(!dir.join("from-cmd").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn serve_starts_in_the_background_and_must_be_the_last_step() {
+        let dir = std::env::temp_dir().join(format!("taku-serve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Takufile.lua");
+
+        let source = r#"
+task("svc", { serve { "sleep 60", ready = { timeout = 0.05 } } })
+task("bad", { serve { "sleep 60" }, "echo after" })
+"#;
+        let services = crate::serve::Services::default();
+        run_task_body(
+            &path,
+            source,
+            "svc",
+            crate::test_apis(),
+            None,
+            &Default::default(),
+            &Default::default(),
+            &services,
+        )
+        .unwrap();
+        assert!(crate::serve::any_running(&services));
+        crate::serve::kill_all(&services);
+        assert!(!crate::serve::any_running(&services));
+
+        let err = run_task_body(
+            &path,
+            source,
+            "bad",
+            crate::test_apis(),
+            None,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("must be the last step"),
+            "got: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_service_that_exits_before_ready_fails_the_task() {
+        let path = std::env::temp_dir().join("taku-serve-dead-Takufile.lua");
+        let source = r#"task("svc", { serve { "sh -c 'exit 3'", ready = { timeout = 2 } } })"#;
+        let services = crate::serve::Services::default();
+        let err = run_task_body(
+            &path,
+            source,
+            "svc",
+            crate::test_apis(),
+            None,
+            &Default::default(),
+            &Default::default(),
+            &services,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("before becoming ready"),
+            "got: {err}"
+        );
+        assert!(!crate::serve::any_running(&services));
     }
 }

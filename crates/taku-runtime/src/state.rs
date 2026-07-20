@@ -41,12 +41,22 @@ pub(crate) const RUNTIME_API: ApiEntry = ApiEntry {
         },
         StepDef {
             tag: "serve",
-            arg: Arg::Table,
-            run: |_, _, _| {
-                Err(mlua::Error::external(
-                    "'serve' steps are not implemented yet",
-                ))
-            },
+            // both `serve "cmd"` and `serve { "cmd", ready = ... }` are valid
+            arg: Arg::Custom(|lua, tag| {
+                lua.create_function(move |lua, v: Value| match v {
+                    Value::Table(t) => {
+                        t.set(TAG, tag)?;
+                        Ok(t)
+                    }
+                    other => {
+                        let t = lua.create_table()?;
+                        t.set(TAG, tag)?;
+                        t.set(1, other)?;
+                        Ok(t)
+                    }
+                })
+            }),
+            run: |_, _, _| Err(mlua::Error::external("serve is handled by the runtime")),
         },
         StepDef {
             tag: "unchanged",
