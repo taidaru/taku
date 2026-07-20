@@ -1,22 +1,25 @@
 # net — network
 
-HTTP is handled by [`ureq`](https://docs.rs/ureq) (HTTP/1.1, redirects, gzip, and
-TLS via rustls — no system OpenSSL).
+Network access for `function(ctx)` steps. For downloads as task steps see the
+`download` step in [Steps](../guide/steps.md).
+
+HTTP is handled by [`ureq`](https://docs.rs/ureq): HTTP/1.1, redirects, gzip,
+TLS via rustls — no system OpenSSL required.
 
 ```lua
-local body = net.http_get("https://example.com/")
-net.download(
-    "https://github.com/taidaru/taku/releases/download/v0.1.2-alpha/taku-x86_64-unknown-linux-gnu.tar.gz",
-    "taku.tar.gz"
-)
+function(ctx)
+    local body = net.get("https://api.example.com/version")
+    net.download("https://example.com/tool.tar.gz", "vendor/tool.tar.gz")
+end
 ```
 
 | Function | Result |
 |---|---|
-| `net.http_get(url)` | response body (bytes); `http://` and `https://` |
-| `net.download(url, path)` | fetch `url`, write the body to `path` |
-| `net.tcp_request(host, port, data)` | raw TCP: send `data`, read the full response |
+| `net.get(url)` | response body (bytes); `http://` and `https://` |
+| `net.download(url, path [, sha256])` | stream the body to `path`; verify the hash if given |
+| `net.tcp(host, port, data)` | raw TCP: send `data`, return the full response |
 
-A non-2xx HTTP status raises an error. `http_get` buffers the body in memory and
-caps it at 64 MiB; `download` streams to disk and allows up to 8 GiB. Requests
-time out after 30 seconds.
+- A non-2xx HTTP status raises an error.
+- `get` buffers in memory, capped at 64 MiB; `download` streams to disk, up to
+  8 GiB. On a `sha256` mismatch the file is deleted and an error is raised.
+- Requests time out after 30 seconds.

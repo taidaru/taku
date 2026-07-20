@@ -26,13 +26,23 @@ pub(crate) const RUNTIME_API: ApiEntry = ApiEntry {
     steps: &[
         StepDef {
             tag: "invoke",
+            // `invoke "t"`, `invoke("t", {p = v})`, and the curried sugar
+            // `invoke "t" { p = v }` — the last one calls the step table, so
+            // it carries a __call that attaches the vars.
             arg: Arg::Custom(|lua, tag| {
                 lua.create_function(move |lua, (name, vars): (String, Option<Table>)| {
                     let t = lua.create_table()?;
                     t.set(TAG, tag)?;
                     t.set(1, name)?;
-                    if let Some(vars) = vars {
-                        t.set("vars", vars)?;
+                    match vars {
+                        Some(vars) => t.set("vars", vars)?,
+                        None => {
+                            let call = lua.create_function(|_, (this, vars): (Table, Table)| {
+                                this.set("vars", vars)?;
+                                Ok(this)
+                            })?;
+                            set_call(lua, &t, call)?;
+                        }
                     }
                     Ok(t)
                 })
@@ -41,7 +51,8 @@ pub(crate) const RUNTIME_API: ApiEntry = ApiEntry {
         },
         StepDef {
             tag: "serve",
-            // both `serve "cmd"` and `serve { "cmd", ready = ... }` are valid
+            // `serve "cmd"`, `serve { "cmd", ready = ... }`, and the curried
+            // sugar `serve "cmd" { ready = ... }` (merges the options in).
             arg: Arg::Custom(|lua, tag| {
                 lua.create_function(move |lua, v: Value| match v {
                     Value::Table(t) => {
@@ -52,6 +63,14 @@ pub(crate) const RUNTIME_API: ApiEntry = ApiEntry {
                         let t = lua.create_table()?;
                         t.set(TAG, tag)?;
                         t.set(1, other)?;
+                        let call = lua.create_function(|_, (this, opts): (Table, Table)| {
+                            for pair in opts.pairs::<Value, Value>() {
+                                let (k, v) = pair?;
+                                this.set(k, v)?;
+                            }
+                            Ok(this)
+                        })?;
+                        set_call(lua, &t, call)?;
                         Ok(t)
                     }
                 })
@@ -65,6 +84,16 @@ pub(crate) const RUNTIME_API: ApiEntry = ApiEntry {
         },
     ],
 };
+
+/// Makes a step table callable (`__call`) so the curried sugar
+/// `verb "arg" { ... }` works: Lua calls the constructor's result with the
+/// trailing table, and the handler folds it into the step.
+fn set_call(lua: &Lua, t: &Table, call: mlua::Function) -> mlua::Result<()> {
+    let mt = lua.create_table()?;
+    mt.set("__call", call)?;
+    t.set_metatable(Some(mt))?;
+    Ok(())
+}
 
 pub(crate) fn all_apis(
     apis: &'static [ApiEntry],
@@ -224,45 +253,56 @@ fn register_import(lua: &Lua, base_dir: PathBuf) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `task("name <param=default>: dep1 dep2", { steps... })` — the second
-/// argument is always a table of steps
+/// `task "name <param=default>: dep1 dep2" { steps... }` or `task(header, steps)`
 fn register_task(lua: &Lua, warnings: bool) -> mlua::Result<()> {
     let tasks = lua.create_table()?;
     lua.set_named_registry_value(TASKS_KEY, &tasks)?;
 
-    let task = lua.create_function(move |lua, (header, steps): (String, Table)| {
-        let parsed = crate::taskdef::parse_header(&header).map_err(mlua::Error::external)?;
-
-        let spec = lua.create_table()?;
-        spec.set("name", parsed.name.as_str())?;
-        spec.set("steps", steps)?;
-        spec.set("deps", lua.create_sequence_from(parsed.deps)?)?;
-        let params = lua.create_table()?;
-        for (i, p) in parsed.params.iter().enumerate() {
-            let entry = lua.create_table()?;
-            entry.set("name", p.name.as_str())?;
-            entry.set("default", p.default.as_deref())?;
-            params.set(i + 1, entry)?;
-        }
-        spec.set("params", params)?;
-
-        let docs: Table = lua.named_registry_value(DOCS_KEY)?;
-        if let Some(doc) = docs.get::<Option<String>>(parsed.name.as_str())? {
-            spec.set("doc", doc)?;
-        }
-
-        let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
-        if warnings && tasks.contains_key(parsed.name.as_str())? {
-            eprintln!(
-                "taku: warning: task '{}' is defined more than once; the last definition wins",
-                parsed.name
-            );
-        }
-        tasks.set(parsed.name.as_str(), spec)?;
-        Ok(())
-    })?;
+    let task = lua.create_function(
+        move |lua, (header, steps): (String, Option<Table>)| match steps {
+            Some(steps) => register_spec(lua, &header, steps, warnings).map(|()| Value::Nil),
+            None => {
+                let f = lua.create_function(move |lua, steps: Table| {
+                    register_spec(lua, &header, steps, warnings)
+                })?;
+                Ok(Value::Function(f))
+            }
+        },
+    )?;
     lua.globals().set("task", task)?;
 
+    Ok(())
+}
+
+fn register_spec(lua: &Lua, header: &str, steps: Table, warnings: bool) -> mlua::Result<()> {
+    let parsed = crate::taskdef::parse_header(header).map_err(mlua::Error::external)?;
+
+    let spec = lua.create_table()?;
+    spec.set("name", parsed.name.as_str())?;
+    spec.set("steps", steps)?;
+    spec.set("deps", lua.create_sequence_from(parsed.deps)?)?;
+    let params = lua.create_table()?;
+    for (i, p) in parsed.params.iter().enumerate() {
+        let entry = lua.create_table()?;
+        entry.set("name", p.name.as_str())?;
+        entry.set("default", p.default.as_deref())?;
+        params.set(i + 1, entry)?;
+    }
+    spec.set("params", params)?;
+
+    let docs: Table = lua.named_registry_value(DOCS_KEY)?;
+    if let Some(doc) = docs.get::<Option<String>>(parsed.name.as_str())? {
+        spec.set("doc", doc)?;
+    }
+
+    let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
+    if warnings && tasks.contains_key(parsed.name.as_str())? {
+        eprintln!(
+            "taku: warning: task '{}' is defined more than once; the last definition wins",
+            parsed.name
+        );
+    }
+    tasks.set(parsed.name.as_str(), spec)?;
     Ok(())
 }
 
@@ -299,6 +339,52 @@ mod tests {
             let value: Value = globals.get(name).unwrap();
             assert!(!value.is_nil(), "{name} API should be present");
         }
+    }
+
+    #[test]
+    fn curried_task_form_registers_with_docs() {
+        let src = "--- says hi\ntask \"hi <name=world>\" {\n    echo \"Hello, ${name}!\",\n}\n";
+        let (lua, _env) =
+            build_state(Path::new("Takufile.lua"), src, true, crate::test_apis()).unwrap();
+        let tasks: Table = lua.named_registry_value(TASKS_KEY).unwrap();
+        let spec: Table = tasks.get("hi").unwrap();
+        assert_eq!(spec.get::<String>("doc").unwrap(), "says hi");
+        assert_eq!(spec.get::<Table>("steps").unwrap().raw_len(), 1);
+    }
+
+    #[test]
+    fn curried_sugar_works_for_invoke_and_serve() {
+        let src = r#"
+task "hello <name=world>" {}
+task "build" { invoke "hello" { name = "alice" } }
+task "svc" { serve "sleep 5" { ready = { timeout = 0.1 } } }
+"#;
+        let (lua, _env) =
+            build_state(Path::new("Takufile.lua"), src, true, crate::test_apis()).unwrap();
+        let tasks: Table = lua.named_registry_value(TASKS_KEY).unwrap();
+
+        let step: Table = tasks
+            .get::<Table>("build")
+            .and_then(|t| t.get::<Table>("steps"))
+            .and_then(|s| s.get(1))
+            .unwrap();
+        assert_eq!(step.get::<String>(TAG).unwrap(), "invoke");
+        assert_eq!(
+            step.get::<Table>("vars")
+                .unwrap()
+                .get::<String>("name")
+                .unwrap(),
+            "alice"
+        );
+
+        let step: Table = tasks
+            .get::<Table>("svc")
+            .and_then(|t| t.get::<Table>("steps"))
+            .and_then(|s| s.get(1))
+            .unwrap();
+        assert_eq!(step.get::<String>(TAG).unwrap(), "serve");
+        assert_eq!(step.get::<String>(1).unwrap(), "sleep 5");
+        assert!(step.get::<Table>("ready").is_ok());
     }
 
     #[test]

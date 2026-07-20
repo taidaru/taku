@@ -6,36 +6,101 @@ Dependencies run first, each at most once, so this builds in order:
 `clean` → `gen` → `build`.
 
 ```lua
-task("clean", {
-    desc = "remove the build dir",
-    run = function()
-        if fs.exists("out") then fs.remove("out") end
-    end,
-})
+--- remove the build dir
+task "clean" {
+    rm "out",
+}
 
-task("gen", {
-    desc = "generate sources",
-    deps = { "clean" },
-    run = function()
-        fs.mkdir("out")
-        fs.write("out/version.txt", "1.0.0\n")
-        print("gen: wrote out/version.txt")
-    end,
-})
+--- generate sources
+task "gen: clean" {
+    mkdir "out",
+    write { "1.0.0", to = "out/version.txt" },
+}
 
-task("build", {
-    desc = "assemble the artifact",
-    deps = { "gen" },
-    run = function()
-        local version = fs.read("out/version.txt")
-        fs.write("out/app.txt", "app " .. version)
-        print("build: done")
-    end,
-})
+--- assemble the artifact
+task "build: gen" {
+    cp { "out/version.txt", to = "out/app.txt" },
+    echo "build: done",
+}
 ```
 
 ```sh
 taku run build       # clean -> gen -> build
+```
+
+## An incremental build with parameters
+
+`unchanged` skips the expensive part when nothing changed; `--vars` overrides
+a header parameter.
+
+```lua
+--- compile the project
+task "build <profile=dev>" {
+    unchanged { "src/**/*.rs", "Cargo.toml", outputs = "target" },
+    "cargo build --profile ${profile}",
+}
+```
+
+```sh
+taku run build                        # full run
+taku run build                        # skip (unchanged)
+taku run build --explain              # says why
+taku run build --vars profile=release # vars are part of the fingerprint
+```
+
+## A dev environment with services
+
+`serve` keeps long-lived processes running; as deps they start in the
+background and the graph continues once they're ready.
+
+```lua
+--- run database migrations
+task "migrate" {
+    "sqlx migrate run",
+}
+
+--- the API server
+task "api: migrate" {
+    serve {
+        "cargo run -p api",
+        ready = { http = "http://127.0.0.1:8000/health", timeout = 30 },
+    },
+}
+
+--- the web frontend
+task "web" {
+    serve { "npm run dev", cwd = "frontend" },
+}
+
+--- the whole dev stack, until Ctrl+C
+task "dev: api web" {}
+```
+
+```sh
+taku run dev
+```
+
+## Mixing data steps with logic
+
+A `function(ctx)` step computes values for later placeholders; `confirm`
+guards a destructive run.
+
+```lua
+--- publish a release
+task "release <tag>" {
+    confirm "publish ${tag}?",
+    function(ctx)
+        local r = cmd.capture({ "git", "rev-parse", "--short", "HEAD" })
+        ctx.vars.sha = r.stdout:gsub("%s+$", "")
+    end,
+    "git tag -a ${tag} -m 'release ${tag} (${sha})'",
+    "git push origin ${tag}",
+}
+```
+
+```sh
+taku run release --vars tag=v1.2.0
+taku run release --vars tag=v1.2.0 --dry-run   # preview: templates unresolved
 ```
 
 ## Generating tasks in a loop
@@ -46,114 +111,17 @@ aggregate that depends on them all (they run in parallel).
 ```lua
 local modules = { "core", "ui", "api" }
 
-local stamps = {}
+local names = {}
 for _, name in ipairs(modules) do
-    local task_name = "stamp-" .. name
-    stamps[#stamps + 1] = task_name
-    task(task_name, {
-        desc = "stamp the " .. name .. " module",
-        run = function()
-            fs.mkdir("out")
-            fs.write("out/" .. name .. ".stamp", "ok\n")
-        end,
+    names[#names + 1] = "check-" .. name
+    task("check-" .. name, {
+        "cargo check -p " .. name,
     })
 end
 
-task("stamp", {
-    desc = "stamp every module",
-    deps = stamps,        -- { "stamp-core", "stamp-ui", "stamp-api" }
-    run = function() print("stamped " .. #stamps .. " modules") end,
-})
-```
-
-## Fan-in: combine many outputs into one
-
-Several tasks produce parts; a final task waits for them, then merges with `fs`.
-
-```lua
-local parts = { "header", "body", "footer" }
-
-local part_tasks = {}
-for i, part in ipairs(parts) do
-    local name = "part-" .. part
-    part_tasks[#part_tasks + 1] = name
-    task(name, {
-        run = function()
-            fs.mkdir("parts")
-            fs.write("parts/" .. i .. "-" .. part .. ".txt", part .. "\n")
-        end,
-    })
-end
-
-task("bundle", {
-    desc = "concatenate the parts in order",
-    deps = part_tasks,
-    run = function()
-        local names = fs.read_dir("parts")
-        table.sort(names)
-        local out = ""
-        for _, name in ipairs(names) do
-            out = out .. fs.read("parts/" .. name)
-        end
-        fs.write("bundle.txt", out)
-        print("bundle: " .. #names .. " parts")
-    end,
-})
-```
-
-## Conditional steps with `env`
-
-```lua
-task("report", {
-    run = function()
-        local mode = env.get("MODE", "dev")     -- default when unset
-        print("building in " .. mode .. " mode")
-        if mode == "release" then
-            fs.mkdir("out")
-            fs.write("out/RELEASE", "")
-        end
-    end,
-})
+task("check-all: " .. table.concat(names, " "), {})
 ```
 
 ```sh
-taku run report                 # building in dev mode
-MODE=release taku run report    # ... and writes out/RELEASE
+taku run check-all    # check-core, check-ui, check-api in parallel
 ```
-
-A `.env` next to your `Takufile.lua` is loaded automatically, so `MODE` could
-instead live there (a real environment variable still overrides it):
-
-```bash
-# .env
-MODE=release
-```
-
-See [`.env` autoloading](api/env#env-autoloading) for the full syntax.
-
-## Calling your tools
-
-Once you want to run your real build/test commands, use `sh`. A command is an
-argument list (no shell); a tiny helper fails the task on a non-zero exit:
-
-```lua
-local function run(argv)
-    local code = sh.run(argv)
-    if code ~= 0 then
-        error(table.concat(argv, " ") .. " failed (exit " .. code .. ")")
-    end
-end
-
--- Replace these with the commands your project actually uses.
-task("test", { run = function() run({ "cargo", "test" }) end })
-task("lint", { run = function() run({ "cargo", "clippy" }) end })
-
-task("ci", {
-    desc = "lint and test in parallel",
-    deps = { "lint", "test" },
-    run = function() print("ci: all green") end,
-})
-```
-
-These need the named programs installed — see [sh](./api/sh.md) for capturing
-output, `cwd`/`env`/`stdin` options, and shell pipelines.

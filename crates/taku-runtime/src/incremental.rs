@@ -131,6 +131,7 @@ fn fingerprint(spec: &Table, t: &Table, ctx: &Ctx) -> Result<Fingerprint, Error>
     let mut plan_text = String::new();
     write_value(&mut plan_text, &Value::Table(steps));
 
+    // Files enter the fingerprint by metadata (size + mtime), not content
     let mut files = String::new();
     for pattern in t.sequence_values::<String>() {
         let pattern = ctx.format(&pattern?)?;
@@ -140,11 +141,17 @@ fn fingerprint(spec: &Table, t: &Table, ctx: &Ctx) -> Result<Fingerprint, Error>
         let mut sorted: Vec<PathBuf> = paths.filter_map(Result::ok).collect();
         sorted.sort();
         for path in sorted {
-            if path.is_file() {
-                files.push_str(&path.to_string_lossy());
-                files.push('\n');
-                files.push_str(&hash(&std::fs::read(&path)?).to_string());
+            let Ok(meta) = path.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
             }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            files.push_str(&path.to_string_lossy());
+            files.push_str(&format!("\n{},{mtime}\n", meta.len()));
         }
     }
 

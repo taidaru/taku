@@ -23,20 +23,47 @@ static APIS: &[taku_api::ApiEntry] = &[
 const TEMPLATE: &str = r#"-- Takufile.lua — tasks for this project, written in Lua.
 --
 -- A task is a list of steps: command strings, step constructors (rm, cp,
--- write, ...), or an escape-hatch function. Deps go after `:` in the header.
--- Run a task with `taku run <name>`; list tasks with `taku list`.
+-- write, unchanged, serve, ...), or an escape-hatch `function(ctx)`.
+-- The header is "name <param=default>: dep1 dep2".
+--
+--   taku list            all tasks with their short docs
+--   taku run <task>      run it (--dry-run to preview, --vars k=v to set params)
 --
 -- API reference & docs: https://taidaru.github.io/taku/
 
 --- say hello
-task("hello <name=world>", {
+task "hello <name=world>" {
     echo "Hello, ${name}!",
-})
+}
 
 --- build the project
-task("build", {
+--- skips itself when the inputs did not change
+task "build" {
+    unchanged { "src/**", outputs = "target" },
     "echo replace me with your build command",
-})
+}
+
+--- run the test suite
+task "test: build" {
+    "echo replace me with your test command",
+}
+
+--- wipe and reseed the local database
+task "db-reset" {
+    confirm "wipe the local database?",
+    "echo replace me with your db reset command",
+}
+
+--- start the dev server, wait until it answers
+task "api" {
+    serve {
+        "echo replace me with your server command",
+        -- ready = { http = "http://127.0.0.1:8000/health", timeout = 10 },
+    },
+}
+
+--- everything a dev session needs
+task "dev: build api" {}
 "#;
 
 fn main() -> ExitCode {

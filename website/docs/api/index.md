@@ -1,20 +1,30 @@
-# API
+# API modules
 
-Inside a Takufile these globals are available, alongside Lua's `string`, `table`,
-`math`, `utf8`, and `coroutine` libraries:
+Modules perform effects **immediately**. They are for `function(ctx)` steps —
+the escape hatch — while normal task bodies use [steps](../guide/steps.md),
+which the runner executes itself.
 
-| Global | Purpose |
+| Module | Purpose |
 |---|---|
-| [`sh`](./sh.md) | run commands |
-| [`fs`](./fs.md) | filesystem |
-| [`net`](./net.md) | TCP / HTTP(S) |
-| [`env`](./env.md) | environment variables |
-| [`ssh`](./ssh.md) | run on / talk to a remote host |
-| `task`, `import` | define tasks, include files |
+| [`cmd`](./cmd.md) | run commands: `run`, `try`, `capture` |
+| [`fs`](./fs.md) | filesystem: read, write, copy, glob, ... |
+| [`net`](./net.md) | HTTP(S) requests, downloads, raw TCP |
+| [`env`](./env.md) | environment variables and `.env` |
 
-Everything else (`io`, `os`, `package`, `debug`, ...) is disabled — see
+Shared rules:
+
+- Effects are available **only while a task runs**. Calling them at the top
+  level of a Takufile is an error; reads (`fs.read`, `fs.glob`, `env.get`, ...)
+  work at load time too.
+- Paths are strings. File contents and command output are **byte strings**,
+  so binary data round-trips unchanged.
+- Failures raise Lua errors with context; catch them with `pcall` if you need
+  to.
+- Modules do **not** apply `${...}` formatting to their arguments — use
+  `fmt("...")` when you need placeholders (see
+  [Variables](../guide/variables.md)).
+
+Also global: `task`, `import`, `fmt`, `raw`, and every
+[step constructor](../guide/steps.md). Lua's `string`, `table`, `math`,
+`utf8`, and `coroutine` libraries are loaded; everything else is off — see
 [Sandbox](../sandbox.md).
-
-Paths are strings; file contents and command output are **byte strings**
-(binary-safe). On failure, these functions raise a Lua error with context, which
-you can catch with `pcall`.

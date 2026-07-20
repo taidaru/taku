@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 
 use mlua::{Lua, Table};
@@ -35,7 +35,9 @@ pub fn rm(path: &str) -> mlua::Result<()> {
     // link itself, never by descending into its target.
     let res = match fs::symlink_metadata(p) {
         Ok(meta) if meta.is_dir() => fs::remove_dir_all(p),
-        _ => fs::remove_file(p),
+        Ok(_) => fs::remove_file(p),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => Err(e),
     };
     res.map_err(|e| ext(&format!("fs.rm({path})"), e))
 }
