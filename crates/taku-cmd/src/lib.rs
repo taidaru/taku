@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::io::{self, Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mlua::{Lua, Table, Value};
@@ -236,26 +238,41 @@ pub fn parse_argv(value: Value) -> mlua::Result<Vec<String>> {
 fn parse_timeout(secs: Option<f64>) -> mlua::Result<Option<Duration>> {
     match secs {
         None => Ok(None),
-        Some(s) if !s.is_finite() || s < 0.0 => Err(mlua::Error::external(format!(
+        // Cap at 1e15 s so `from_secs_f64` can't overflow and
+        // panic; the range also rejects NaN and infinity.
+        Some(s) if !(0.0..=1e15).contains(&s) => Err(mlua::Error::external(format!(
             "timeout must be a non-negative number of seconds, got {s}"
         ))),
         Some(s) => Ok(Some(Duration::from_secs_f64(s))),
     }
 }
 
-fn parse_opts(opts: Option<Table>) -> mlua::Result<Opts> {
-    let mut out = Opts::default();
+fn parse_opts(dotenv: &HashMap<String, String>, opts: Option<Table>) -> mlua::Result<Opts> {
+    // Same precedence as the cmd/argv/pipe steps (`step_opts`): inherited env
+    // < `.env` (fills unset only) < explicit `env=`.
+    let mut env: Vec<(String, String)> = dotenv
+        .iter()
+        .filter(|(k, _)| std::env::var_os(k).is_none())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    env.sort();
+    let mut out = Opts {
+        env,
+        ..Opts::default()
+    };
     if let Some(t) = opts {
         out.stdin = t
             .get::<Option<mlua::String>>("stdin")?
             .map(|s| s.as_bytes().to_vec());
         out.cwd = t.get("cwd")?;
-        if let Some(env) = t.get::<Option<Table>>("env")? {
-            for pair in env.pairs::<String, String>() {
-                out.env.push(pair?);
+        if let Some(step_env) = t.get::<Option<Table>>("env")? {
+            let mut extra = Vec::new();
+            for pair in step_env.pairs::<String, String>() {
+                extra.push(pair?);
             }
-            // sort, so the env is deterministic.
-            out.env.sort();
+            // sort, so the env is deterministic; extend so explicit env wins.
+            extra.sort();
+            out.env.extend(extra);
         }
         out.timeout = parse_timeout(t.get::<Option<f64>>("timeout")?)?;
     }
@@ -412,7 +429,7 @@ fn pipe_step(t: &Table, ctx: &mut StepCtx) -> mlua::Result<()> {
 
 pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
     globals: &["cmd"],
-    register: |lua, _ctx| register(lua),
+    register: |lua, ctx| register(lua, ctx.dotenv.clone()),
     steps: &[
         StepDef {
             tag: "cmd",
@@ -432,13 +449,14 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
     ],
 };
 
-pub fn register(lua: &Lua) -> mlua::Result<()> {
+pub fn register(lua: &Lua, dotenv: Arc<HashMap<String, String>>) -> mlua::Result<()> {
+    let (d_run, d_try, d_capture) = (dotenv.clone(), dotenv.clone(), dotenv);
     taku_api::lua_api!(lua, global = "cmd" {
         // cmd.run: success or error — a non-zero exit raises.
-        run => |_, (cmd, opts): (Value, Option<Table>)| {
+        run => move |_, (cmd, opts): (Value, Option<Table>)| {
             taku_api::require_runtime("cmd.run")?;
             let argv = parse_argv(cmd)?;
-            let code = run(&argv, &parse_opts(opts)?)?;
+            let code = run(&argv, &parse_opts(&d_run, opts)?)?;
             if code != 0 {
                 return Err(mlua::Error::external(format!(
                     "cmd.run({}): exit {code}",
@@ -448,13 +466,13 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         },
         // cmd.try: like run, but the exit code is the caller's problem.
-        try => |_, (cmd, opts): (Value, Option<Table>)| {
+        try => move |_, (cmd, opts): (Value, Option<Table>)| {
             taku_api::require_runtime("cmd.try")?;
-            run(&parse_argv(cmd)?, &parse_opts(opts)?)
+            run(&parse_argv(cmd)?, &parse_opts(&d_try, opts)?)
         },
-        capture => |lua, (cmd, opts): (Value, Option<Table>)| {
+        capture => move |lua, (cmd, opts): (Value, Option<Table>)| {
             taku_api::require_runtime("cmd.capture")?;
-            capture_table(lua, capture(&parse_argv(cmd)?, &parse_opts(opts)?)?)
+            capture_table(lua, capture(&parse_argv(cmd)?, &parse_opts(&d_capture, opts)?)?)
         },
     })
 }
@@ -468,7 +486,7 @@ mod tests {
         // Tests exercise the API as a task body would: runtime phase on.
         taku_api::set_runtime(true);
         let lua = Lua::new();
-        register(&lua).unwrap();
+        register(&lua, Arc::new(HashMap::new())).unwrap();
         lua
     }
 
@@ -607,5 +625,23 @@ mod tests {
     fn empty_argv_is_rejected() {
         let err = lua().load("cmd.run({})").exec().unwrap_err();
         assert!(err.to_string().contains("argument list is empty"));
+    }
+
+    #[test]
+    fn dotenv_fills_unset_child_env_for_module_calls() {
+        taku_api::set_runtime(true);
+        let lua = Lua::new();
+        let mut dotenv = HashMap::new();
+        dotenv.insert("TAKU_DOTENV_ONLY".to_string(), "from-dotenv".to_string());
+        register(&lua, Arc::new(dotenv)).unwrap();
+        lua.load(
+            r#"
+            local r = cmd.capture({ "printenv", "TAKU_DOTENV_ONLY" })
+            assert(r.code == 0, "exit " .. r.code)
+            assert(r.stdout == "from-dotenv\n", "got: " .. r.stdout)
+        "#,
+        )
+        .exec()
+        .unwrap();
     }
 }

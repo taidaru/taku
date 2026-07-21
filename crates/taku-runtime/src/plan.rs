@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use mlua::{Lua, Table};
@@ -25,21 +25,37 @@ pub(crate) fn build(lua: &Lua, takufile: &Path, command: &str) -> Result<Plan, E
 
 /// Pretty execution graph.
 pub(crate) fn render(plan: &Plan, root: &str) -> String {
-    fn walk(name: &str, prefix: &str, deps: &HashMap<String, Vec<String>>, out: &mut String) {
+    fn walk(
+        name: &str,
+        prefix: &str,
+        deps: &HashMap<String, Vec<String>>,
+        seen: &mut HashSet<String>,
+        out: &mut String,
+    ) {
         let ds = deps.get(name).map(Vec::as_slice).unwrap_or_default();
         for (i, dep) in ds.iter().enumerate() {
             let last = i + 1 == ds.len();
             out.push_str(prefix);
             out.push_str(if last { "└─ " } else { "├─ " });
             out.push_str(dep);
-            out.push('\n');
+            // Expand each shared subtree only once; a repeat of a node that has
+            // children is shown as `name …`, so a diamond or duplicate-dep
+            // graph renders in O(nodes) instead of blowing up exponentially.
             let child_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
-            walk(dep, &child_prefix, deps, out);
+            if seen.insert(dep.clone()) {
+                out.push('\n');
+                walk(dep, &child_prefix, deps, seen, out);
+            } else if deps.get(dep).is_some_and(|d| !d.is_empty()) {
+                out.push_str(" …\n");
+            } else {
+                out.push('\n');
+            }
         }
     }
 
     let mut out = format!("{root}\n");
-    walk(root, "", &plan.deps, &mut out);
+    let mut seen = HashSet::from([root.to_string()]);
+    walk(root, "", &plan.deps, &mut seen, &mut out);
     out
 }
 
@@ -77,7 +93,11 @@ fn collect(
     for dep in dep_table.sequence_values::<String>() {
         let dep = dep?;
         collect(tasks, takufile, &dep, deps, stack)?;
-        dep_names.push(dep);
+        // Dedup a task's own repeated deps so the ready-queue and the rendered
+        // tree don't process the same edge twice.
+        if !dep_names.contains(&dep) {
+            dep_names.push(dep);
+        }
     }
     stack.pop();
     deps.insert(name.to_string(), dep_names);

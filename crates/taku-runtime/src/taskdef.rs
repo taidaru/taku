@@ -15,8 +15,26 @@ pub(crate) struct Header {
 
 /// Parses `"name <p1> <p2=def>: dep1 dep2"`. Params and deps are optional.
 pub(crate) fn parse_header(header: &str) -> Result<Header, String> {
-    let (left, deps_part) = match header.split_once(':') {
-        Some((l, r)) => (l, Some(r)),
+    // Split on the first `:` that is *outside* a `<...>` param, so a default
+    // may itself contain a colon (`<bind=0.0.0.0:8080>`, `<url=http://x>`).
+    let sep = {
+        let mut depth = 0i32;
+        let mut at = None;
+        for (i, c) in header.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => depth -= 1,
+                ':' if depth <= 0 => {
+                    at = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        at
+    };
+    let (left, deps_part) = match sep {
+        Some(i) => (&header[..i], Some(&header[i + 1..])),
         None => (header, None),
     };
 
@@ -183,6 +201,18 @@ task('blank-separated', {})
         assert_eq!(docs.get("build").unwrap(), "build the project\nsecond line");
         assert!(!docs.contains_key("undocumented"));
         assert!(!docs.contains_key("blank-separated"));
+    }
+
+    #[test]
+    fn param_default_may_contain_a_colon() {
+        let h = parse_header("serve <bind=0.0.0.0:8080>").unwrap();
+        assert_eq!(h.name, "serve");
+        assert_eq!(h.params[0].name, "bind");
+        assert_eq!(h.params[0].default.as_deref(), Some("0.0.0.0:8080"));
+        assert!(h.deps.is_empty());
+        let h = parse_header("deploy <url=http://x>: build").unwrap();
+        assert_eq!(h.params[0].default.as_deref(), Some("http://x"));
+        assert_eq!(h.deps, ["build"]);
     }
 
     #[test]

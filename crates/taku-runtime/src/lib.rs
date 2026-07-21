@@ -76,7 +76,7 @@ impl Runtime {
         if opts.dry_run {
             println!("{}", plan::render(&plan, command));
         }
-        let hold = service_graph(&self.lua, &plan)?;
+        let hold = holds_services(&spec)?;
         let style = report::Style::init();
 
         let start = Instant::now();
@@ -91,7 +91,10 @@ impl Runtime {
             &overrides,
             hold,
         )?;
-        report::summary(&style, ran, start.elapsed());
+        // A dry run prints the plan only — no ✓ markers, no run summary.
+        if !opts.dry_run {
+            report::summary(&style, ran, start.elapsed());
+        }
         Ok(())
     }
 
@@ -110,26 +113,20 @@ impl Runtime {
     }
 }
 
-/// True when every task in the plan is a service (its last step is `serve`)
-/// or a bare aggregator (no steps, deps only).
-fn service_graph(lua: &Lua, plan: &plan::Plan) -> Result<bool, Error> {
-    let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
-    for name in &plan.tasks {
-        let spec: Table = tasks.get(name.as_str())?;
-        let steps: Table = spec.get("steps")?;
-        let len = steps.raw_len();
-        if len == 0 {
-            continue;
-        }
-        let last: mlua::Value = steps.raw_get(len)?;
-        let is_serve = matches!(&last, mlua::Value::Table(t)
-            if t.get::<Option<String>>(taku_api::steps::TAG).ok().flatten().as_deref()
-                == Some("serve"));
-        if !is_serve {
-            return Ok(false);
-        }
+/// Keep services running when the target is a service (ends in `serve`) or a
+/// bare aggregator (e.g. `dev: build api`). One-shot targets keep the usual
+/// serve-as-a-dep behavior: their services stop when they finish. The hold only
+/// applies if services are still running.
+fn holds_services(spec: &Table) -> Result<bool, Error> {
+    let steps: Table = spec.get("steps")?;
+    let len = steps.raw_len();
+    if len == 0 {
+        return Ok(true);
     }
-    Ok(true)
+    let last: mlua::Value = steps.raw_get(len)?;
+    Ok(matches!(&last, mlua::Value::Table(t)
+        if t.get::<Option<String>>(taku_api::steps::TAG).ok().flatten().as_deref()
+            == Some("serve")))
 }
 
 pub fn format_error(error: &Error) -> String {
