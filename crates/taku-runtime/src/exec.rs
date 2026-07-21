@@ -30,6 +30,9 @@ pub(crate) struct Ctx {
     /// State file to write after the task succeeds, set by an `unchanged`
     /// guard that decided to run.
     pub pending_state: Option<(std::path::PathBuf, [u8; 32])>,
+    /// Task names currently on the `invoke` call chain, for cycle detection —
+    /// the planner only sees header deps, not `invoke` steps.
+    pub invoke_stack: Vec<String>,
 }
 
 impl Ctx {
@@ -322,10 +325,31 @@ fn run_invoke(
     t: &Table,
     ctx: &mut Ctx,
 ) -> Result<(), Error> {
+    // Cycle detection: the planner walks header deps only, never `invoke`
+    // steps, so a self/mutual invoke would recurse until the stack overflows.
+    if ctx.invoke_stack.iter().any(|n| n == name) {
+        let mut chain = ctx.invoke_stack.clone();
+        chain.push(name.to_string());
+        return Err(Error::TaskFailed(format!(
+            "invoke cycle: {}",
+            chain.join(" -> ")
+        )));
+    }
+
     let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
     let spec: Table = tasks
         .get::<Option<Table>>(name)?
         .ok_or_else(|| Error::TaskFailed(format!("invoke '{name}': no such task")))?;
+
+    // Real runs claim the task up front so an invoke of an already-run (or
+    // concurrently-scheduled) task is a no-op, not a second execution. A dry
+    // run only prints, so it never touches the shared set.
+    if !ctx.dry_run && !ctx.done.lock().unwrap().insert(name.to_string()) {
+        return Ok(());
+    }
+
+    let mut invoke_stack = ctx.invoke_stack.clone();
+    invoke_stack.push(name.to_string());
     let mut sub = Ctx {
         dotenv: ctx.dotenv.clone(),
         vars: initial_vars(&spec)?,
@@ -337,18 +361,20 @@ fn run_invoke(
         done: ctx.done.clone(),
         services: ctx.services.clone(),
         pending_state: None,
+        invoke_stack,
     };
+    // Validated like `--vars` so an invoke with an unknown/missing param
+    // errors instead of silently passing through.
     if let Some(vars) = t.get::<Option<Table>>("vars")? {
+        let mut pairs = Vec::new();
         for pair in vars.pairs::<String, String>() {
             let (k, v) = pair?;
-            sub.vars.insert(k, v);
+            pairs.push((k, ctx.format(&v)?));
         }
+        sub.vars.extend(validate_vars(&spec, &pairs)?);
     }
     run_steps(lua, apis, &spec, &mut sub)
-        .map_err(|e| Error::TaskFailed(format!("invoke '{name}': {e}")))?;
-    // an invoke always runs, but its completion satisfies later deps
-    ctx.done.lock().unwrap().insert(name.to_string());
-    Ok(())
+        .map_err(|e| Error::TaskFailed(format!("invoke '{name}': {e}")))
 }
 
 #[cfg(test)]

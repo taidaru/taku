@@ -1,7 +1,7 @@
 //! `serve`: long-lived service processes, allowed only as a task's last step.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,15 @@ pub(crate) fn kill_all(services: &Services) {
     for mut service in services.lock().unwrap().drain(..) {
         let _ = service.child.kill();
         let _ = service.child.wait();
+    }
+}
+
+/// Kill every running service in place (without draining) so an in-flight
+/// `wait_ready` sees its child die on the next `try_wait` and returns fast.
+/// The reaping happens later in `kill_all`.
+pub(crate) fn kill_running(services: &Services) {
+    for service in services.lock().unwrap().iter_mut() {
+        let _ = service.child.kill();
     }
 }
 
@@ -53,7 +62,8 @@ pub(crate) fn reap_failure(services: &Services) -> Option<String> {
 pub(crate) fn run(spec: &Table, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
     if !t.get::<Value>(1)?.is_nil() {
         let task: String = spec.get("name")?;
-        return start(&task, t, ctx);
+        spawn(&task, t, ctx)?;
+        return wait_ready(&task, t.get::<Option<Table>>("ready")?, &ctx.services);
     }
     let mut entries: Vec<(String, Table)> = Vec::new();
     for pair in t.pairs::<Value, Value>() {
@@ -71,13 +81,19 @@ pub(crate) fn run(spec: &Table, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
         ));
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, svc) in entries {
-        start(&name, &svc, ctx)?;
+    // Spawn every service first, then wait for readiness — so a service whose
+    // health check depends on a sibling isn't blocked by that sibling not yet
+    // being started.
+    for (name, svc) in &entries {
+        spawn(name, svc, ctx)?;
+    }
+    for (name, svc) in &entries {
+        wait_ready(name, svc.get::<Option<Table>>("ready")?, &ctx.services)?;
     }
     Ok(())
 }
 
-fn start(name: &str, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
+fn spawn(name: &str, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
     let template: String = t
         .get::<Option<String>>(1)?
         .ok_or_else(|| Error::TaskFailed(format!("serve '{name}': missing command string")))?;
@@ -120,8 +136,18 @@ fn start(name: &str, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
         name: name.to_string(),
         child,
     });
+    Ok(())
+}
 
-    wait_ready(name, t.get::<Option<Table>>("ready")?, &ctx.services)
+/// Rejects negative/NaN/overflowing input instead of letting `from_secs_f64` panic.
+fn duration(name: &str, secs: f64) -> Result<Duration, Error> {
+    // The range rejects NaN/infinity and caps below `from_secs_f64`'s overflow.
+    if !(0.0..=1e15).contains(&secs) {
+        return Err(Error::TaskFailed(format!(
+            "serve '{name}': ready.timeout must be a non-negative number of seconds, got {secs}"
+        )));
+    }
+    Ok(Duration::from_secs_f64(secs))
 }
 
 /// `ready = { timeout = secs }` waits that long;
@@ -150,7 +176,7 @@ fn wait_ready(name: &str, ready: Option<Table>, services: &Services) -> Result<(
         let secs = timeout.ok_or_else(|| {
             Error::TaskFailed(format!("serve '{name}': ready needs timeout or http"))
         })?;
-        let deadline = Instant::now() + Duration::from_secs_f64(secs);
+        let deadline = Instant::now() + duration(name, secs)?;
         loop {
             if let Some(status) = died(services) {
                 return fail(status);
@@ -162,19 +188,23 @@ fn wait_ready(name: &str, ready: Option<Table>, services: &Services) -> Result<(
         }
     };
 
-    let deadline = Instant::now() + Duration::from_secs_f64(timeout.unwrap_or(30.0));
+    let deadline = Instant::now() + duration(name, timeout.unwrap_or(30.0))?;
     loop {
         if let Some(status) = died(services) {
             return fail(status);
         }
-        if http_ready(&url) {
-            println!("taku: service '{name}' ready");
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
+        // Bound each connect/read by the time left (capped so the loop keeps
+        // re-checking died()/the deadline) — otherwise a filtered or slow host
+        // could block far past the configured timeout.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Err(Error::TaskFailed(format!(
                 "serve '{name}': not ready before the timeout"
             )));
+        }
+        if http_ready(&url, remaining.min(Duration::from_secs(2))) {
+            println!("taku: service '{name}' ready");
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -183,7 +213,7 @@ fn wait_ready(name: &str, ready: Option<Table>, services: &Services) -> Result<(
 /// Plain HTTP/1.0 GET over a TCP stream; ready means a 2xx status. Anything
 /// else — connection refused, 5xx from a warming-up server — is "not ready
 /// yet", never an error; the poll just continues until the timeout.
-fn http_ready(url: &str) -> bool {
+fn http_ready(url: &str, timeout: Duration) -> bool {
     let Some(rest) = url.strip_prefix("http://") else {
         return false;
     };
@@ -193,10 +223,16 @@ fn http_ready(url: &str) -> bool {
     } else {
         format!("{host}:80")
     };
-    let Ok(mut stream) = TcpStream::connect(&addr) else {
+    let Ok(mut addrs) = addr.to_socket_addrs() else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let Some(target) = addrs.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&target, timeout) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
     if stream
         .write_all(format!("GET /{path} HTTP/1.0\r\nHost: {host}\r\n\r\n").as_bytes())
         .is_err()

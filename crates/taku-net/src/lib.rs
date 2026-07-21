@@ -1,7 +1,7 @@
 pub mod http;
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -24,9 +24,21 @@ pub fn tcp(host: &str, port: u16, data: &[u8]) -> mlua::Result<Vec<u8>> {
     let _ = sock.set_read_timeout(Some(TIMEOUT));
     let _ = sock.set_write_timeout(Some(TIMEOUT));
     sock.write_all(data).map_err(|e| ext(&ctx, e))?;
+    // Half-close so a peer that reads until EOF sees the request end and replies.
+    let _ = sock.shutdown(Shutdown::Write);
     let mut buf = Vec::new();
-    sock.read_to_end(&mut buf).map_err(|e| ext(&ctx, e))?;
-    Ok(buf)
+    match sock.read_to_end(&mut buf) {
+        Ok(_) => Ok(buf),
+        // A read timeout after some bytes arrived: return what we received
+        // rather than discarding a response the peer did send.
+        Err(e)
+            if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                && !buf.is_empty() =>
+        {
+            Ok(buf)
+        }
+        Err(e) => Err(ext(&ctx, e)),
+    }
 }
 
 pub fn get(url: &str) -> mlua::Result<Vec<u8>> {

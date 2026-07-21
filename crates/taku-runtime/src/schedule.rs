@@ -105,7 +105,9 @@ pub(crate) fn execute(
             running -= 1;
             match res {
                 Ok(()) => {
-                    report::task_done(style, &name, elapsed);
+                    if !opts.dry_run {
+                        report::task_done(style, &name, elapsed);
+                    }
                     if let Some(ds) = dependents.get(name.as_str()) {
                         for d in ds {
                             if let Some(count) = indegree.get_mut(*d) {
@@ -121,6 +123,10 @@ pub(crate) fn execute(
                     report::task_failed(style, &name, elapsed);
                     if first_err.is_none() {
                         first_err = Some(Error::TaskFailed(message));
+                        // Kill running services now so an in-flight `wait_ready`
+                        // sees its child die and returns, instead of holding
+                        // teardown behind the slowest service's ready timeout.
+                        crate::serve::kill_running(&services);
                     } else {
                         eprintln!("{}", style.error(&message));
                     }
@@ -212,8 +218,10 @@ fn run_task_body(
     done: &crate::exec::Done,
     services: &crate::serve::Services,
 ) -> Result<(), Error> {
-    // completed by any path already (e.g. `invoke`d by another task) — skip
-    if done.lock().unwrap().contains(name) {
+    // Claim the task up front (atomic check-and-insert): one already run or
+    // claimed by another path — a concurrent worker or an `invoke` — is a
+    // no-op here rather than a second execution.
+    if !done.lock().unwrap().insert(name.to_string()) {
         return Ok(());
     }
     let (lua, dotenv) = build_state(path, source, false, apis)?;
@@ -241,6 +249,8 @@ fn run_task_body(
         done: done.clone(),
         services: services.clone(),
         pending_state: None,
+        // seed with this task so `task "a" { invoke "a" }` is caught as a cycle
+        invoke_stack: vec![name.to_string()],
     };
     if opts.dry_run {
         println!("{name}:");
@@ -251,7 +261,6 @@ fn run_task_body(
     let result = crate::exec::run_steps(&lua, apis, &spec, &mut ctx);
     taku_api::set_runtime(false);
     result?;
-    done.lock().unwrap().insert(name.to_string());
     Ok(())
 }
 
@@ -578,6 +587,44 @@ task("bad", { serve { "sleep 60" }, "echo after" })
             "got: {err}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_self_invoke_is_a_clean_cycle_error_not_a_stack_overflow() {
+        let path = std::env::temp_dir().join("taku-invoke-cycle-Takufile.lua");
+        let source = r#"task("a", { invoke "a" })"#;
+        let err = run_task_body(
+            &path,
+            source,
+            "a",
+            crate::test_apis(),
+            None,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invoke cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn a_negative_ready_timeout_errors_instead_of_panicking() {
+        let path = std::env::temp_dir().join("taku-serve-badtimeout-Takufile.lua");
+        let source = r#"task("svc", { serve { "sleep 60", ready = { timeout = -1 } } })"#;
+        let services = crate::serve::Services::default();
+        let err = run_task_body(
+            &path,
+            source,
+            "svc",
+            crate::test_apis(),
+            None,
+            &Default::default(),
+            &Default::default(),
+            &services,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("non-negative"), "got: {err}");
+        crate::serve::kill_all(&services);
     }
 
     #[test]

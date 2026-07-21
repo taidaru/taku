@@ -227,6 +227,13 @@ fn register_import(lua: &Lua, base_dir: PathBuf) -> mlua::Result<()> {
         let target = current.join(&rel);
         let canonical = fs::canonicalize(&target)
             .map_err(|e| mlua::Error::external(format!("import('{rel}'): {e}")))?;
+        // `.lua` text only — even through a symlink, the resolved target must
+        // be a Lua file; nothing else is loadable as a Takufile fragment.
+        if canonical.extension().and_then(|e| e.to_str()) != Some("lua") {
+            return Err(mlua::Error::external(format!(
+                "import('{rel}'): only .lua files can be imported"
+            )));
+        }
 
         if !state.borrow_mut().imported.insert(canonical.clone()) {
             return Ok(());
