@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use mlua::Table;
 
+use crate::diagnostic::Diagnostic;
 use crate::error::Error;
 use crate::plan::Plan;
 use crate::report::{self, Style};
@@ -61,11 +62,25 @@ pub(crate) fn execute(
             .map_or(1, NonZeroUsize::get)
     };
     let mut running = 0;
-    let mut first_err: Option<Error> = None;
-    let worker_style = *style;
+    let mut first_err: Option<Box<Diagnostic>> = None;
+
+    // Run-wide output layout: the `│` aligns to the longest task name, and each
+    // task gets a palette colour by its (sorted) position. A dry run prints the
+    // plan, so it never streams prefixed output.
+    let width = plan
+        .tasks
+        .iter()
+        .map(|t| t.chars().count())
+        .max()
+        .unwrap_or(0);
+    let color_on = report::Style::stdout_color();
 
     std::thread::scope(|scope| {
-        let (tx, rx) = mpsc::channel::<(String, Result<(), String>, Duration)>();
+        let (tx, rx) = mpsc::channel::<(
+            String,
+            Result<crate::exec::Outcome, Box<Diagnostic>>,
+            Duration,
+        )>();
         loop {
             // launch ready tasks up to the job limit
             while first_err.is_none() && running < max {
@@ -76,18 +91,23 @@ pub(crate) fn execute(
                 let name = name.to_string();
                 let done = done.clone();
                 let services = services.clone();
+                let sink = (!opts.dry_run).then(|| {
+                    let idx = plan.tasks.iter().position(|t| *t == name).unwrap_or(0);
+                    taku_api::steps::OutputSink {
+                        label: name.clone(),
+                        width,
+                        // No colour under --json: forced child ANSI would land
+                        // inside the JSON line strings.
+                        color: (color_on && !opts.json)
+                            .then(|| report::PALETTE[idx % report::PALETTE.len()]),
+                        json: opts.json,
+                        quiet: opts.quiet,
+                    }
+                });
                 scope.spawn(move || {
                     let start = Instant::now();
                     let res = run_task(
-                        path,
-                        source,
-                        &name,
-                        &worker_style,
-                        apis,
-                        overrides,
-                        opts,
-                        &done,
-                        &services,
+                        path, source, &name, apis, overrides, opts, &done, &services, sink,
                     );
                     let _ = tx.send((name, res, start.elapsed()));
                 });
@@ -104,9 +124,9 @@ pub(crate) fn execute(
             };
             running -= 1;
             match res {
-                Ok(()) => {
+                Ok(outcome) => {
                     if !opts.dry_run {
-                        report::task_done(style, &name, elapsed);
+                        report::task_done(style, &name, outcome, elapsed, opts.json, opts.quiet);
                     }
                     if let Some(ds) = dependents.get(name.as_str()) {
                         for d in ds {
@@ -119,16 +139,19 @@ pub(crate) fn execute(
                         }
                     }
                 }
-                Err(message) => {
-                    report::task_failed(style, &name, elapsed);
+                Err(diag) => {
+                    report::task_failed(style, &name, elapsed, opts.json, opts.quiet);
                     if first_err.is_none() {
-                        first_err = Some(Error::TaskFailed(message));
+                        first_err = Some(diag);
                         // Kill running services now so an in-flight `wait_ready`
                         // sees its child die and returns, instead of holding
                         // teardown behind the slowest service's ready timeout.
                         crate::serve::kill_running(&services);
                     } else {
-                        eprintln!("{}", style.error(&message));
+                        eprintln!(
+                            "{}",
+                            crate::diagnostic::renderer(opts.json, *style).render(&diag)
+                        );
                     }
                 }
             }
@@ -142,11 +165,16 @@ pub(crate) fn execute(
     // failure brings every other service down.
     if crate::serve::any_running(&services) {
         if hold && first_err.is_none() {
-            println!("taku: services running — press Ctrl+C to stop");
+            report::info(
+                opts.quiet,
+                opts.json,
+                "services running — press Ctrl+C to stop",
+            );
             loop {
                 std::thread::sleep(Duration::from_millis(300));
-                if let Some(failure) = crate::serve::reap_failure(&services) {
-                    first_err = Some(Error::TaskFailed(failure));
+                if let Some(failure) = crate::serve::reap_failure(&services, opts.json, opts.quiet)
+                {
+                    first_err = Some(Box::new(Diagnostic::error(failure)));
                     break;
                 }
                 if !crate::serve::any_running(&services) {
@@ -155,15 +183,15 @@ pub(crate) fn execute(
             }
         }
         if first_err.is_none()
-            && let Some(failure) = crate::serve::reap_failure(&services)
+            && let Some(failure) = crate::serve::reap_failure(&services, opts.json, opts.quiet)
         {
-            first_err = Some(Error::TaskFailed(failure));
+            first_err = Some(Box::new(Diagnostic::error(failure)));
         }
         crate::serve::kill_all(&services);
     }
 
     match first_err {
-        Some(e) => Err(e),
+        Some(diag) => Err(Error::Task(diag)),
         None => Ok(plan.tasks.len()),
     }
 }
@@ -173,27 +201,25 @@ fn run_task(
     path: &Path,
     source: &str,
     name: &str,
-    style: &Style,
     apis: &'static [taku_api::ApiEntry],
     overrides: Option<&HashMap<String, String>>,
     opts: &crate::RunOpts,
     done: &crate::exec::Done,
     services: &crate::serve::Services,
-) -> Result<(), String> {
+    sink: Option<taku_api::steps::OutputSink>,
+) -> Result<crate::exec::Outcome, Box<Diagnostic>> {
     let body = AssertUnwindSafe(|| {
-        run_task_body(path, source, name, apis, overrides, opts, done, services)
+        run_task_body(
+            path, source, name, apis, overrides, opts, done, services, sink,
+        )
     });
     match catch_unwind(body) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(Error::Lua(e))) => Err(format!(
-            "task '{name}' failed\n{}",
-            crate::diagnostic::render(&e, style)
-        )),
-        Ok(Err(e)) => Err(format!("task '{name}' failed: {e}")),
-        Err(payload) => Err(format!(
+        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Err(e)) => Err(Box::new(crate::diagnostic::from_error(&e))),
+        Err(payload) => Err(Box::new(Diagnostic::error(format!(
             "task '{name}' panicked: {}",
             panic_message(payload.as_ref())
-        )),
+        )))),
     }
 }
 
@@ -217,14 +243,15 @@ fn run_task_body(
     opts: &crate::RunOpts,
     done: &crate::exec::Done,
     services: &crate::serve::Services,
-) -> Result<(), Error> {
+    sink: Option<taku_api::steps::OutputSink>,
+) -> Result<crate::exec::Outcome, Error> {
     // Claim the task up front (atomic check-and-insert): one already run or
     // claimed by another path — a concurrent worker or an `invoke` — is a
     // no-op here rather than a second execution.
     if !done.lock().unwrap().insert(name.to_string()) {
-        return Ok(());
+        return Ok(crate::exec::Outcome::Ran);
     }
-    let (lua, dotenv) = build_state(path, source, false, apis)?;
+    let (lua, dotenv) = build_state(path, source, crate::state::Warnings::Off, apis)?;
     let tasks: Table = lua.named_registry_value(TASKS_KEY)?;
     let spec: Table = tasks
         .get::<Option<Table>>(name)?
@@ -233,6 +260,9 @@ fn run_task_body(
             takufile: path.to_path_buf(),
             available: Vec::new(),
         })?;
+    // Publish the sink so module effects (`cmd.run`) in function-steps stream
+    // under this task's prefix, just like data-steps.
+    taku_api::steps::set_sink(sink.clone());
     // placeholder priority: param defaults < --vars < ctx.vars set by steps
     let mut vars = crate::exec::initial_vars(&spec)?;
     if let Some(o) = overrides {
@@ -251,6 +281,9 @@ fn run_task_body(
         pending_state: None,
         // seed with this task so `task "a" { invoke "a" }` is caught as a cycle
         invoke_stack: vec![name.to_string()],
+        output: sink,
+        json: opts.json,
+        quiet: opts.quiet,
     };
     if opts.dry_run {
         println!("{name}:");
@@ -260,8 +293,7 @@ fn run_task_body(
     taku_api::set_runtime(true);
     let result = crate::exec::run_steps(&lua, apis, &spec, &mut ctx);
     taku_api::set_runtime(false);
-    result?;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -276,7 +308,13 @@ mod tests {
         let sub = dir.join("made-by-task").display().to_string();
 
         let top_level = format!("fs.mkdir('{sub}')");
-        let err = build_state(&path, &top_level, false, crate::test_apis()).unwrap_err();
+        let err = build_state(
+            &path,
+            &top_level,
+            crate::state::Warnings::Off,
+            crate::test_apis(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("only available while a task is running"),
@@ -293,6 +331,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            None,
         )
         .unwrap();
         assert!(std::path::Path::new(&sub).is_dir());
@@ -321,7 +360,13 @@ task("files <name=greeting>", {{
 task("all: files", {{}})
 "#
         );
-        let (lua, _env) = build_state(&path, &source, false, crate::test_apis()).unwrap();
+        let (lua, _env) = build_state(
+            &path,
+            &source,
+            crate::state::Warnings::Off,
+            crate::test_apis(),
+        )
+        .unwrap();
         let plan = crate::plan::build(&lua, &path, "all").unwrap();
         assert_eq!(plan.deps["all"], ["files"]);
 
@@ -334,6 +379,7 @@ task("all: files", {{}})
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            None,
         )
         .unwrap();
         let b = std::fs::read_to_string(dir.join("out/b.txt")).unwrap();
@@ -374,6 +420,7 @@ task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -392,6 +439,7 @@ task("o <x=a>", {{ "touch {d}/o-${{x}}" }})
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            None,
         )
         .unwrap();
         assert!(dir.join("o-b").is_file());
@@ -429,6 +477,7 @@ task("t1", {{ invoke "db-reset" }})
             &yes_opts,
             &done,
             &Default::default(),
+            None,
         )
         .unwrap();
         assert!(done.lock().unwrap().contains("db-reset"));
@@ -443,6 +492,7 @@ task("t1", {{ invoke "db-reset" }})
             &yes_opts,
             &done,
             &Default::default(),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -482,6 +532,7 @@ task("build", {{
                 opts,
                 &Default::default(),
                 &Default::default(),
+                None,
             )
             .unwrap();
         };
@@ -537,6 +588,7 @@ task("t", {{
             },
             &Default::default(),
             &Default::default(),
+            None,
         )
         .unwrap();
         assert!(!dir.join("made").exists());
@@ -565,13 +617,17 @@ task("bad", { serve { "sleep 60" }, "echo after" })
             &Default::default(),
             &Default::default(),
             &services,
+            None,
         )
         .unwrap();
         assert!(crate::serve::any_running(&services));
         crate::serve::kill_all(&services);
         assert!(!crate::serve::any_running(&services));
 
-        let err = run_task_body(
+        // A `serve` that isn't last warns (not errors), starts, and stops the
+        // task after the rest; it counts as run, and the service is left running.
+        let services = crate::serve::Services::default();
+        let outcome = run_task_body(
             &path,
             source,
             "bad",
@@ -579,13 +635,13 @@ task("bad", { serve { "sleep 60" }, "echo after" })
             None,
             &Default::default(),
             &Default::default(),
-            &Default::default(),
+            &services,
+            None,
         )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("must be the last step"),
-            "got: {err}"
-        );
+        .unwrap();
+        assert!(matches!(outcome, crate::exec::Outcome::Ran));
+        assert!(crate::serve::any_running(&services));
+        crate::serve::kill_all(&services);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -602,6 +658,7 @@ task("bad", { serve { "sleep 60" }, "echo after" })
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("invoke cycle"), "got: {err}");
@@ -621,6 +678,7 @@ task("bad", { serve { "sleep 60" }, "echo after" })
             &Default::default(),
             &Default::default(),
             &services,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("non-negative"), "got: {err}");
@@ -641,10 +699,11 @@ task("bad", { serve { "sleep 60" }, "echo after" })
             &Default::default(),
             &Default::default(),
             &services,
+            None,
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("before becoming ready"),
+            err.to_string().contains("exited with status 3"),
             "got: {err}"
         );
         assert!(!crate::serve::any_running(&services));

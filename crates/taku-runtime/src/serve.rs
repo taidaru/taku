@@ -1,16 +1,43 @@
 //! `serve`: long-lived service processes, allowed only as a task's last step.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mlua::{Table, Value};
+use taku_api::steps::{OutputSink, Stream};
 
 use crate::error::Error;
 use crate::exec::Ctx;
+
+/// Streams a service's piped stdout/stderr under the task prefix from detached
+/// readers that end when the child's pipes close (i.e. when it is killed).
+fn stream_service(child: &mut Child, sink: &OutputSink) {
+    fn reader<R: Read + Send + 'static>(reader: Option<R>, sink: OutputSink, stream: Stream) {
+        let Some(reader) = reader else { return };
+        let mut reader = BufReader::new(reader);
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                            buf.pop();
+                        }
+                        sink.line(stream, &String::from_utf8_lossy(&buf));
+                    }
+                }
+            }
+        });
+    }
+    reader(child.stdout.take(), sink.clone(), Stream::Stdout);
+    reader(child.stderr.take(), sink.clone(), Stream::Stderr);
+}
 
 /// The run-scoped registry of started services.
 pub(crate) type Services = Arc<Mutex<Vec<Service>>>;
@@ -40,16 +67,20 @@ pub(crate) fn any_running(services: &Services) -> bool {
     !services.lock().unwrap().is_empty()
 }
 
-pub(crate) fn reap_failure(services: &Services) -> Option<String> {
+pub(crate) fn reap_failure(services: &Services, json: bool, quiet: bool) -> Option<String> {
     let mut services = services.lock().unwrap();
     let mut failure = None;
     services.retain_mut(|service| match service.child.try_wait() {
         Ok(Some(status)) if status.success() => {
-            println!("taku: service '{}' exited", service.name);
+            crate::report::service_event(quiet, json, &service.name, "exited", None);
             false
         }
         Ok(Some(status)) => {
-            failure = Some(format!("service '{}' {status}", service.name));
+            failure = Some(format!(
+                "service '{}' {}",
+                service.name,
+                status_phrase(status)
+            ));
             false
         }
         _ => true,
@@ -61,9 +92,23 @@ pub(crate) fn reap_failure(services: &Services) -> Option<String> {
 /// `serve { api = {...}, web = {...} }` — several, by key.
 pub(crate) fn run(spec: &Table, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
     if !t.get::<Value>(1)?.is_nil() {
+        if has_service_key(t)? {
+            return Err(Error::Task(Box::new(
+                crate::diagnostic::Diagnostic::error(
+                    "serve: 'api'/'web' cannot be combined with a command string",
+                )
+                .help("use either a command form or { api = {...}, web = {...} }, not both"),
+            )));
+        }
         let task: String = spec.get("name")?;
         spawn(&task, t, ctx)?;
-        return wait_ready(&task, t.get::<Option<Table>>("ready")?, &ctx.services);
+        return wait_ready(
+            &task,
+            t.get::<Option<Table>>("ready")?,
+            &ctx.services,
+            ctx.json,
+            ctx.quiet,
+        );
     }
     let mut entries: Vec<(String, Table)> = Vec::new();
     for pair in t.pairs::<Value, Value>() {
@@ -88,9 +133,30 @@ pub(crate) fn run(spec: &Table, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
         spawn(name, svc, ctx)?;
     }
     for (name, svc) in &entries {
-        wait_ready(name, svc.get::<Option<Table>>("ready")?, &ctx.services)?;
+        wait_ready(
+            name,
+            svc.get::<Option<Table>>("ready")?,
+            &ctx.services,
+            ctx.json,
+            ctx.quiet,
+        )?;
     }
     Ok(())
+}
+
+/// A table-valued key that isn't a command option — i.e. a named service — so
+/// the command form and the `{ api = {...} }` form aren't mixed.
+fn has_service_key(t: &Table) -> Result<bool, Error> {
+    for pair in t.pairs::<Value, Value>() {
+        let (k, v) = pair?;
+        if let (Value::String(k), Value::Table(_)) = (&k, &v) {
+            let key = k.to_string_lossy();
+            if !matches!(key.as_ref(), "ready" | "cwd" | "env") && key != taku_api::steps::TAG {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn spawn(name: &str, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
@@ -128,15 +194,57 @@ fn spawn(name: &str, t: &Table, ctx: &mut Ctx) -> Result<(), Error> {
         cmd.current_dir(cwd);
     }
     cmd.envs(envs.iter().map(|(k, v)| (k, v)));
-    let child = cmd
+    // A service outlives the step, so its output streams through detached
+    // readers holding an owned sink labelled with the service name.
+    let sink = ctx.output.as_ref().map(|s| OutputSink {
+        label: name.to_string(),
+        ..s.clone()
+    });
+    if let Some(sink) = &sink {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        for (k, v) in sink.color_env() {
+            if !envs.iter().any(|(ek, _)| ek == *k) {
+                cmd.env(k, v);
+            }
+        }
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| Error::TaskFailed(format!("serve '{name}': {}: {e}", argv[0])))?;
-    println!("taku: service '{name}' started (pid {})", child.id());
+    if let Some(sink) = sink {
+        stream_service(&mut child, &sink);
+    }
+    crate::report::service_event(ctx.quiet, ctx.json, name, "started", Some(child.id()));
     ctx.services.lock().unwrap().push(Service {
         name: name.to_string(),
         child,
     });
     Ok(())
+}
+
+/// How a finished service exited, phrased for the diagnostic: `exited with
+/// status 1` or `terminated by SIGINT`.
+fn status_phrase(status: ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exited with status {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            let name = match sig {
+                1 => "SIGHUP".to_string(),
+                2 => "SIGINT".to_string(),
+                3 => "SIGQUIT".to_string(),
+                6 => "SIGABRT".to_string(),
+                9 => "SIGKILL".to_string(),
+                15 => "SIGTERM".to_string(),
+                n => format!("signal {n}"),
+            };
+            return format!("terminated by {name}");
+        }
+    }
+    "exited abnormally".to_string()
 }
 
 /// Rejects negative/NaN/overflowing input instead of letting `from_secs_f64` panic.
@@ -154,7 +262,13 @@ fn duration(name: &str, secs: f64) -> Result<Duration, Error> {
 /// `http = "http://host:port/path"` polls until the endpoint answers 2xx
 /// (any other status just isn't ready yet), with `timeout` as the cap
 /// (default 30s). No `ready` at all: ready immediately.
-fn wait_ready(name: &str, ready: Option<Table>, services: &Services) -> Result<(), Error> {
+fn wait_ready(
+    name: &str,
+    ready: Option<Table>,
+    services: &Services,
+    json: bool,
+    quiet: bool,
+) -> Result<(), Error> {
     let Some(ready) = ready else { return Ok(()) };
     let timeout = ready.get::<Option<f64>>("timeout")?;
     let http: Option<String> = ready.get("http")?;
@@ -168,7 +282,8 @@ fn wait_ready(name: &str, ready: Option<Table>, services: &Services) -> Result<(
     };
     let fail = |status: ExitStatus| {
         Err(Error::TaskFailed(format!(
-            "serve '{name}': {status} before becoming ready"
+            "service '{name}' {}",
+            status_phrase(status)
         )))
     };
 
@@ -188,7 +303,8 @@ fn wait_ready(name: &str, ready: Option<Table>, services: &Services) -> Result<(
         }
     };
 
-    let deadline = Instant::now() + duration(name, timeout.unwrap_or(30.0))?;
+    let cap = timeout.unwrap_or(30.0);
+    let deadline = Instant::now() + duration(name, cap)?;
     loop {
         if let Some(status) = died(services) {
             return fail(status);
@@ -199,11 +315,11 @@ fn wait_ready(name: &str, ready: Option<Table>, services: &Services) -> Result<(
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(Error::TaskFailed(format!(
-                "serve '{name}': not ready before the timeout"
+                "service '{name}' timed out after {cap}s waiting to become ready"
             )));
         }
         if http_ready(&url, remaining.min(Duration::from_secs(2))) {
-            println!("taku: service '{name}' ready");
+            crate::report::service_event(quiet, json, name, "ready", None);
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(200));

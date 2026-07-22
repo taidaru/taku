@@ -1,10 +1,42 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mlua::{Lua, Table};
 use taku_api::ext;
-use taku_api::steps::{Arg, StepCtx, StepDef};
+use taku_api::steps::{Arg, Field, FieldKind, Positional, StepCtx, StepDef};
+
+/// `{ <payload>|[1], to = "..." }` — the shared shape of `cp`/`mv`/`write`/
+/// `append`: a required payload (positional or its named field) plus a
+/// required `to`. The payload field is not itself `required` — the positional
+/// check enforces it, satisfied by `[1]` or the field.
+const fn to_fields(payload: &'static str) -> [Field; 2] {
+    [
+        Field {
+            name: payload,
+            kind: FieldKind::Str,
+            required: false,
+        },
+        Field {
+            name: "to",
+            kind: FieldKind::Str,
+            required: true,
+        },
+    ]
+}
+const PATH_TO: &[Field] = &to_fields("src");
+const DATA_TO: &[Field] = &to_fields("data");
+const LINE_TO: &[Field] = &to_fields("line");
+
+const fn payload(what: &'static str, field: &'static str) -> Positional {
+    Positional {
+        what,
+        suggest: field,
+        help: "add it as the first element or a named field",
+        field: Some(field),
+    }
+}
 
 pub fn read(path: &str) -> mlua::Result<Vec<u8>> {
     fs::read(path).map_err(|e| ext(&format!("fs.read({path})"), e))
@@ -43,9 +75,30 @@ pub fn rm(path: &str) -> mlua::Result<()> {
 }
 
 pub fn cp(src: &str, dst: &str) -> mlua::Result<()> {
-    fs::copy(src, dst)
-        .map(|_| ())
+    let mut seen = HashSet::new();
+    copy_recursive(Path::new(src), Path::new(dst), &mut seen)
         .map_err(|e| ext(&format!("fs.cp({src} -> {dst})"), e))
+}
+
+/// Copies a file, or a whole directory tree, following symlinks — `fs::copy`
+/// alone only handles single files. `seen` tracks canonical directory paths so
+/// a symlink cycle (e.g. `src/link -> src/`) stops instead of recursing to ELOOP.
+fn copy_recursive(src: &Path, dst: &Path, seen: &mut HashSet<PathBuf>) -> io::Result<()> {
+    if fs::metadata(src)?.is_dir() {
+        if let Ok(real) = fs::canonicalize(src)
+            && !seen.insert(real)
+        {
+            return Ok(());
+        }
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &dst.join(entry.file_name()), seen)?;
+        }
+        Ok(())
+    } else {
+        fs::copy(src, dst).map(|_| ())
+    }
 }
 
 pub fn mv(src: &str, dst: &str) -> mlua::Result<()> {
@@ -87,16 +140,10 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
     globals: &["fs"],
     register: |lua, _ctx| register(lua),
     steps: &[
-        StepDef {
-            tag: "rm",
-            arg: Arg::Str,
-            run: |_, t, ctx| rm(&ctx.fmt_value(t.get(1)?)?),
-        },
-        StepDef {
-            tag: "mkdir",
-            arg: Arg::Str,
-            run: |_, t, ctx| mkdir(&ctx.fmt_value(t.get(1)?)?),
-        },
+        StepDef::simple("rm", Arg::Str, |_, t, ctx| rm(&ctx.fmt_value(t.get(1)?)?)),
+        StepDef::simple("mkdir", Arg::Str, |_, t, ctx| {
+            mkdir(&ctx.fmt_value(t.get(1)?)?)
+        }),
         StepDef {
             tag: "cp",
             arg: Arg::Table,
@@ -104,6 +151,8 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
                 let (src, to) = src_to(t, ctx)?;
                 cp(&src, &to)
             },
+            fields: PATH_TO,
+            positional: Some(payload("source path", "src")),
         },
         StepDef {
             tag: "mv",
@@ -112,6 +161,8 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
                 let (src, to) = src_to(t, ctx)?;
                 mv(&src, &to)
             },
+            fields: PATH_TO,
+            positional: Some(payload("source path", "src")),
         },
         StepDef {
             tag: "write",
@@ -121,6 +172,8 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
                 let to = ctx.fmt_value(t.get("to")?)?;
                 write(&to, data.as_bytes())
             },
+            fields: DATA_TO,
+            positional: Some(payload("content", "data")),
         },
         StepDef {
             tag: "append",
@@ -130,6 +183,8 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
                 let to = ctx.fmt_value(t.get("to")?)?;
                 append(&to, format!("{line}\n").as_bytes())
             },
+            fields: LINE_TO,
+            positional: Some(payload("line", "line")),
         },
     ],
 };
@@ -207,5 +262,21 @@ mod tests {
     #[test]
     fn bad_glob_pattern_is_an_error() {
         assert!(glob("[").is_err());
+    }
+
+    #[test]
+    fn cp_copies_a_directory_tree() {
+        let root = std::env::temp_dir().join(format!("taku-fs-cp-{}", std::process::id()));
+        let src = root.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "aaa").unwrap();
+        fs::write(src.join("sub/b.txt"), "bbb").unwrap();
+
+        let dst = root.join("dst");
+        cp(&src.to_string_lossy(), &dst.to_string_lossy()).unwrap();
+
+        assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "aaa");
+        assert_eq!(fs::read_to_string(dst.join("sub/b.txt")).unwrap(), "bbb");
+        fs::remove_dir_all(&root).unwrap();
     }
 }

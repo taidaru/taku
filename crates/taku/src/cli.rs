@@ -7,6 +7,14 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Emit all output as JSON (one object per line)
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Print only errors — suppress warnings, progress markers, and command output
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
 }
 
 #[derive(Debug, Subcommand)]

@@ -30,15 +30,16 @@ pub(crate) fn format(
                     .ok_or_else(|| format!("unclosed placeholder: {}", &template[i - 1..]))?;
                 let inner = &template[i + 1..end];
                 if let Some(name) = inner.strip_prefix('$') {
-                    let value = env(name)
-                        .ok_or_else(|| format!("environment variable ${name} is not set"))?;
+                    let value = env(name).ok_or_else(|| {
+                        format!("environment variable '{name}' is required but not set")
+                    })?;
                     out.push_str(&value);
                 } else if inner.is_empty() {
                     return Err("empty placeholder ${}".to_string());
                 } else {
                     let value = vars
                         .get(inner)
-                        .ok_or_else(|| format!("unknown variable ${{{inner}}}"))?;
+                        .ok_or_else(|| format!("undefined variable '${{{inner}}}' in template"))?;
                     out.push_str(value);
                 }
                 i = end + 1;
@@ -49,12 +50,13 @@ pub(crate) fn format(
                     i += 1;
                 }
                 let name = &template[start..i];
-                let value =
-                    env(name).ok_or_else(|| format!("environment variable ${name} is not set"))?;
+                let value = env(name).ok_or_else(|| {
+                    format!("environment variable '{name}' is required but not set")
+                })?;
                 out.push_str(&value);
             }
             _ => {
-                return Err("stray '$' (use $$ for a literal dollar sign)".to_string());
+                return Err("stray '$' in template (use '$$' for a literal dollar)".to_string());
             }
         }
     }
@@ -88,7 +90,7 @@ mod tests {
     #[test]
     fn missing_var_is_an_error() {
         let err = format("${nope}", &vars(&[]), &env).unwrap_err();
-        assert!(err.contains("unknown variable"), "got: {err}");
+        assert!(err.contains("undefined variable"), "got: {err}");
     }
 
     #[test]
@@ -106,7 +108,7 @@ mod tests {
     fn braced_env_form_works() {
         assert_eq!(format("${$HOME}x", &vars(&[]), &env).unwrap(), "stub-homex");
         let err = format("${$NOPE}", &vars(&[]), &env).unwrap_err();
-        assert!(err.contains("$NOPE is not set"), "got: {err}");
+        assert!(err.contains("'NOPE' is required"), "got: {err}");
     }
 
     #[test]

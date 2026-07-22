@@ -8,7 +8,7 @@ use std::time::Duration;
 use mlua::Value;
 use sha2::{Digest, Sha256};
 use taku_api::ext;
-use taku_api::steps::{Arg, StepDef};
+use taku_api::steps::{Arg, Field, FieldKind, Positional, StepDef};
 use ureq::Agent;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -84,10 +84,11 @@ pub fn download(url: &str, path: &str, sha256: Option<&str>) -> mlua::Result<()>
         // A file that failed verification must not be left looking downloaded.
         drop(file);
         let _ = std::fs::remove_file(path);
-        return Err(ext(
-            &ctx,
-            format!("sha256 mismatch: expected {expected}, got {digest}"),
-        ));
+        return Err(
+            taku_api::Diag::new(format!("checksum mismatch for '{url}'"))
+                .note(format!("expected {expected}, got {digest}"))
+                .into_lua(),
+        );
     }
     Ok(())
 }
@@ -107,6 +108,30 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
             };
             download(&url, &to, sha.as_deref())
         },
+        // `url` may be positional or a field; `to` is required.
+        fields: &[
+            Field {
+                name: "url",
+                kind: FieldKind::Str,
+                required: false,
+            },
+            Field {
+                name: "to",
+                kind: FieldKind::Str,
+                required: true,
+            },
+            Field {
+                name: "sha256",
+                kind: FieldKind::Str,
+                required: false,
+            },
+        ],
+        positional: Some(Positional {
+            what: "url",
+            suggest: "https://...",
+            help: "add it as the first element or the 'url' field",
+            field: Some("url"),
+        }),
     }],
 };
 

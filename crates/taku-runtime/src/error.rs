@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::diagnostic::Diagnostic;
 use crate::state::TAKUFILE;
 
 #[derive(Debug)]
@@ -13,6 +14,9 @@ pub enum Error {
     },
     DependencyCycle(Vec<String>),
     TaskFailed(String),
+    /// A task failed with a fully-formed diagnostic, built in the worker and
+    /// rendered once on the main thread. Boxed to keep `Error` small.
+    Task(Box<Diagnostic>),
     Io(std::io::Error),
     Lua(mlua::Error),
     Dotenv(dotenvy::Error),
@@ -38,6 +42,7 @@ impl fmt::Display for Error {
                 write!(f, "dependency cycle: {}", path.join(" -> "))
             }
             Error::TaskFailed(message) => write!(f, "{message}"),
+            Error::Task(diag) => write!(f, "{}", diag.message),
             Error::Io(e) => write!(f, "{e}"),
             Error::Lua(e) => write!(f, "{e}"),
             Error::Dotenv(e) => write!(f, ".env: {e}"),

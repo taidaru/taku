@@ -66,17 +66,17 @@ impl Fingerprint {
 pub(crate) fn check(spec: &Table, t: &Table, ctx: &mut Ctx) -> Result<Decision, Error> {
     let name: String = spec.get("name")?;
     let state_path = ctx.base.join(".taku/state").join(format!("{name}.bin"));
-    let fp = fingerprint(spec, t, ctx)?;
+    let (fp, matched) = fingerprint(spec, t, ctx)?;
 
     let explain = |reason: &str| {
         if ctx.explain {
-            println!("taku: {name}: {reason}");
+            crate::report::info(ctx.quiet, ctx.json, &format!("{name}: {reason}"));
         }
     };
 
     let rebuild = |reason: &str, ctx: &mut Ctx| {
         if ctx.explain {
-            println!("taku: {name}: rebuild ({reason})");
+            crate::report::info(ctx.quiet, ctx.json, &format!("{name}: rebuild ({reason})"));
         }
         ctx.pending_state = Some((state_path.clone(), fp.to_bytes()));
         Ok(Decision::Run)
@@ -84,6 +84,12 @@ pub(crate) fn check(spec: &Table, t: &Table, ctx: &mut Ctx) -> Result<Decision, 
 
     if ctx.force {
         return rebuild("--force", ctx);
+    }
+    // No matching inputs means there is nothing to prove "unchanged" — the guard
+    // must always run (and records no state, so it keeps running).
+    if matched == 0 {
+        explain("no matching inputs — always runs");
+        return Ok(Decision::Run);
     }
     let old = match std::fs::read(&state_path) {
         Ok(bytes) => Fingerprint::from_bytes(&bytes),
@@ -126,21 +132,31 @@ fn missing_output(t: &Table, ctx: &Ctx) -> Result<Option<String>, Error> {
     Ok(None)
 }
 
-fn fingerprint(spec: &Table, t: &Table, ctx: &Ctx) -> Result<Fingerprint, Error> {
+/// The task fingerprint and the number of input files the globs matched (zero
+/// means there is nothing to compare, so the guard must never skip).
+fn fingerprint(spec: &Table, t: &Table, ctx: &Ctx) -> Result<(Fingerprint, usize), Error> {
     let steps: Table = spec.get("steps")?;
     let mut plan_text = String::new();
-    write_value(&mut plan_text, &Value::Table(steps));
+    write_value(&mut plan_text, &Value::Table(steps), true);
 
     // Files enter the fingerprint by metadata (size + mtime), not content
     let mut files = String::new();
+    let mut matched = 0usize;
     for pattern in t.sequence_values::<String>() {
         let pattern = ctx.format(&pattern?)?;
         let full = ctx.base.join(&pattern);
-        let paths = glob::glob(&full.to_string_lossy())
-            .map_err(|e| Error::TaskFailed(format!("unchanged: bad glob '{pattern}': {e}")))?;
+        let paths = glob::glob(&full.to_string_lossy()).map_err(|e| {
+            Error::Task(Box::new(
+                crate::diagnostic::Diagnostic::error(format!("invalid glob pattern '{pattern}'"))
+                    .note(e.msg.to_string()),
+            ))
+        })?;
         let mut sorted: Vec<PathBuf> = paths.filter_map(Result::ok).collect();
         sorted.sort();
+        let before = matched;
         for path in sorted {
+            // Only regular files carry a size+mtime fingerprint — directories and
+            // broken symlinks (metadata errors) contribute nothing.
             let Ok(meta) = path.metadata() else { continue };
             if !meta.is_file() {
                 continue;
@@ -152,6 +168,20 @@ fn fingerprint(spec: &Table, t: &Table, ctx: &Ctx) -> Result<Fingerprint, Error>
                 .map_or(0, |d| d.as_nanos());
             files.push_str(&path.to_string_lossy());
             files.push_str(&format!("\n{},{mtime}\n", meta.len()));
+            matched += 1;
+        }
+        // Warn when a pattern contributes no files at all — an empty glob, or one
+        // that matched only directories: the guard can never call it unchanged.
+        if matched == before && !ctx.quiet {
+            let warning = crate::diagnostic::Diagnostic::warning(format!(
+                "unchanged: glob '{pattern}' matched no files"
+            ))
+            .note("without matching inputs, this step is never considered unchanged");
+            eprintln!(
+                "{}",
+                crate::diagnostic::renderer(ctx.json, crate::report::Style::init())
+                    .render(&warning)
+            );
         }
     }
 
@@ -179,22 +209,26 @@ fn fingerprint(spec: &Table, t: &Table, ctx: &Ctx) -> Result<Fingerprint, Error>
         env.push_str(&format!("{k}={v}\n"));
     }
 
-    Ok(Fingerprint {
-        files: hash(files.as_bytes()),
-        plan: hash(plan_text.as_bytes()),
-        vars: hash(vars.as_bytes()),
-        env: hash(env.as_bytes()),
-    })
+    Ok((
+        Fingerprint {
+            files: hash(files.as_bytes()),
+            plan: hash(plan_text.as_bytes()),
+            vars: hash(vars.as_bytes()),
+            env: hash(env.as_bytes()),
+        },
+        matched,
+    ))
 }
 
 fn hash(data: &[u8]) -> u64 {
     xxhash_rust::xxh64::xxh64(data, 0)
 }
 
-/// Stable, order-independent text form of a step value. Function steps are
-/// opaque and serialize as a placeholder — their bodies aren't fingerprinted.
-/// Also reused by `--dry-run` to render step arguments.
-pub(crate) fn write_value(out: &mut String, v: &Value) {
+/// Stable, order-independent text form of a step value. With `hash_fn`, a
+/// function is fingerprinted by a hash of its (stripped) bytecode so an edited
+/// body invalidates the cache; without it — for `--dry-run` display — it renders
+/// as a plain `<function>`.
+pub(crate) fn write_value(out: &mut String, v: &Value, hash_fn: bool) {
     match v {
         Value::String(s) => {
             out.push('"');
@@ -204,12 +238,17 @@ pub(crate) fn write_value(out: &mut String, v: &Value) {
         Value::Integer(n) => out.push_str(&n.to_string()),
         Value::Number(n) => out.push_str(&n.to_string()),
         Value::Boolean(b) => out.push_str(&b.to_string()),
+        Value::Function(f) if hash_fn => {
+            // Stripped bytecode: the code, not line numbers, so an unrelated
+            // edit above the function doesn't spuriously invalidate it.
+            out.push_str(&format!("<function:{}>", hash(&f.dump(true))));
+        }
         Value::Function(_) => out.push_str("<function>"),
         Value::Table(t) => {
             let mut pairs: Vec<(String, Value)> = Vec::new();
             for pair in t.pairs::<Value, Value>().flatten() {
                 let mut key = String::new();
-                write_value(&mut key, &pair.0);
+                write_value(&mut key, &pair.0, hash_fn);
                 pairs.push((key, pair.1));
             }
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -217,7 +256,7 @@ pub(crate) fn write_value(out: &mut String, v: &Value) {
             for (k, v) in &pairs {
                 out.push_str(k);
                 out.push('=');
-                write_value(out, v);
+                write_value(out, v, hash_fn);
                 out.push(';');
             }
             out.push('}');
