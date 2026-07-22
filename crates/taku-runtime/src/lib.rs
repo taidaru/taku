@@ -8,8 +8,10 @@ mod plan;
 mod report;
 mod schedule;
 mod serve;
+mod srcmap;
 mod state;
 mod taskdef;
+mod validate;
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -38,6 +40,11 @@ pub struct RunOpts<'a> {
     /// `--dry-run`: print the plan instead of executing it. Command steps
     /// show their unresolved templates so secrets stay out of the output.
     pub dry_run: bool,
+    /// `--json`: emit diagnostics and run events as JSON.
+    pub json: bool,
+    /// `--quiet`: print only error diagnostics — no warnings, info, markers,
+    /// summary, or command output.
+    pub quiet: bool,
 }
 
 pub struct Runtime {
@@ -50,15 +57,31 @@ pub struct Runtime {
 impl Runtime {
     /// `apis` is the full registry of API crates, assembled by the binary —
     /// the runtime itself depends only on `taku-api`.
-    pub fn load(apis: &'static [ApiEntry]) -> Result<Runtime, Error> {
+    pub fn load(apis: &'static [ApiEntry], json: bool, quiet: bool) -> Result<Runtime, Error> {
         let path = find_takufile().ok_or(Error::TakufileNotFound)?;
+        // Operate from the project root (where the Takufile lives) so relative
+        // paths, globs, `.env`, and `.taku/` resolve consistently no matter which
+        // subdirectory `taku` was invoked from.
+        if let Some(dir) = path.parent() {
+            std::env::set_current_dir(dir).map_err(|e| {
+                Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", dir.display()),
+                ))
+            })?;
+        }
         let source = std::fs::read_to_string(&path).map_err(|e| {
             Error::Io(std::io::Error::new(
                 e.kind(),
                 format!("{}: {e}", path.display()),
             ))
         })?;
-        let (lua, _dotenv) = build_state(&path, &source, true, apis)?;
+        let warnings = if quiet {
+            state::Warnings::Off
+        } else {
+            state::Warnings::On { json }
+        };
+        let (lua, _dotenv) = build_state(&path, &source, warnings, apis)?;
         Ok(Runtime {
             lua,
             path,
@@ -93,7 +116,10 @@ impl Runtime {
         )?;
         // A dry run prints the plan only — no ✓ markers, no run summary.
         if !opts.dry_run {
-            report::summary(&style, ran, start.elapsed());
+            report::summary(&style, ran, start.elapsed(), opts.json, opts.quiet);
+        } else if !opts.quiet {
+            let info = diagnostic::Diagnostic::info("dry run — no commands were executed");
+            eprintln!("{}", diagnostic::renderer(opts.json, style).render(&info));
         }
         Ok(())
     }
@@ -129,12 +155,19 @@ fn holds_services(spec: &Table) -> Result<bool, Error> {
             == Some("serve")))
 }
 
-pub fn format_error(error: &Error) -> String {
-    let style = report::Style::init();
-    match error {
-        Error::Lua(e) => style.error(&diagnostic::render(e, &style)),
-        other => style.error(&other.to_string()),
-    }
+pub fn format_error(error: &Error, json: bool) -> String {
+    diagnostic::renderer(json, report::Style::init()).render(&diagnostic::from_error(error))
+}
+
+/// Renders the "unknown subcommand" diagnostic for the CLI (`taku build`),
+/// where clap only knows the attempted name.
+pub fn render_unknown_command(name: &str, json: bool) -> String {
+    diagnostic::renderer(json, report::Style::init()).render(&diagnostic::unknown_command(name))
+}
+
+/// Renders the "bad --jobs value" diagnostic for the CLI.
+pub fn render_bad_jobs(value: &str, json: bool) -> String {
+    diagnostic::renderer(json, report::Style::init()).render(&diagnostic::bad_jobs(value))
 }
 
 #[cfg(test)]

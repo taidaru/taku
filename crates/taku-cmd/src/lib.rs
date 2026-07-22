@@ -1,12 +1,33 @@
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mlua::{Lua, Table, Value};
-use taku_api::steps::{Arg, StepCtx, StepDef};
+use taku_api::steps::{Arg, Field, FieldKind, OutputSink, StepCtx, StepDef, Stream};
+
+const fn opt(name: &'static str, kind: FieldKind) -> Field {
+    Field {
+        name,
+        kind,
+        required: false,
+    }
+}
+
+/// Options common to every command step.
+const CWD: Field = opt("cwd", FieldKind::Str);
+const ENV: Field = opt("env", FieldKind::Table);
+const ALLOW_FAIL: Field = opt("allow_fail", FieldKind::Bool);
+const TIMEOUT: Field = opt("timeout", FieldKind::Num);
+const STDIN: Field = opt("stdin", FieldKind::Str);
+
+/// `cmd`/`argv` accept a `stdin` string; `pipe` does not (it wires stages
+/// together and never feeds the first stage), so advertising it would let a
+/// silently-ignored option pass validation.
+const CMD_FIELDS: &[Field] = &[CWD, ENV, ALLOW_FAIL, TIMEOUT, STDIN];
+const PIPE_FIELDS: &[Field] = &[CWD, ENV, ALLOW_FAIL, TIMEOUT];
 
 #[derive(Default)]
 pub struct Opts {
@@ -38,6 +59,48 @@ pub fn command(argv: &[String], opts: &Opts) -> Command {
 
 fn err<E: Display>(op: &str, argv: &[String], e: E) -> mlua::Error {
     mlua::Error::external(format!("cmd.{op}({}): {e}", argv.join(" ")))
+}
+
+/// Resolves `${task-var}` placeholders for a failure note, leaving `$ENV`
+/// refs literal so resolved secrets never reach the output.
+fn resolve_display(template: &str, vars: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(pos) = rest.find("${") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + 2..];
+        match after.find('}') {
+            Some(end) => {
+                let name = &after[..end];
+                match vars.get(name) {
+                    Some(value) => out.push_str(value),
+                    None => out.push_str(&format!("${{{name}}}")),
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[pos..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Shapes a run/streamed failure: a timeout becomes the catalogue diagnostic,
+/// anything else keeps its context-prefixed message.
+fn run_err(opts: &Opts, ctx: &str, e: io::Error) -> mlua::Error {
+    if e.kind() == io::ErrorKind::TimedOut
+        && let Some(timeout) = opts.timeout
+    {
+        return taku_api::Diag::new(format!(
+            "command timed out after {}s",
+            timeout.as_secs_f64()
+        ))
+        .into_lua();
+    }
+    mlua::Error::external(format!("{ctx}: {e}"))
 }
 
 fn feed(stdin: &mut ChildStdin, data: &[u8]) -> io::Result<()> {
@@ -165,24 +228,101 @@ fn wait_output_with_timeout(
 }
 
 pub fn run(argv: &[String], opts: &Opts) -> mlua::Result<i32> {
-    // `cmd.run` takes a literal argv, so echoing it back is safe.
-    run_ctx(argv, opts, &format!("cmd.run({})", argv.join(" ")))
+    // `cmd.run` takes a literal argv, so echoing it back is safe. Stream under
+    // the current task's prefix, just like a command step.
+    let ctx = format!("cmd.run({})", argv.join(" "));
+    taku_api::steps::with_sink(|sink| run_ctx(argv, opts, sink, &ctx))
 }
 
 /// Steps resolve their argv from `${...}` placeholders that may carry secrets, so
 /// they pass a redacted label here rather than leaking the resolved command.
-fn run_ctx(argv: &[String], opts: &Opts, ctx: &str) -> mlua::Result<i32> {
+/// With a `sink`, the child's output is piped and streamed line-by-line under a
+/// `<task> │ ` prefix; without one it inherits the terminal.
+fn run_ctx(
+    argv: &[String],
+    opts: &Opts,
+    sink: Option<&OutputSink>,
+    ctx: &str,
+) -> mlua::Result<i32> {
+    if let Some(sink) = sink {
+        return run_streamed(argv, opts, sink, ctx);
+    }
     let mut command = command(argv, opts);
     if opts.stdin.is_some() {
         command.stdin(Stdio::piped());
     }
-    let mkerr = |e: io::Error| mlua::Error::external(format!("{ctx}: {e}"));
-    let child = command.spawn().map_err(mkerr)?;
+    let child = command.spawn().map_err(|e| run_err(opts, ctx, e))?;
     let status = match opts.timeout {
         Some(timeout) => wait_status_with_timeout(child, timeout, opts.stdin.as_deref()),
         None => wait_status_with_input(child, opts.stdin.as_deref()),
     }
-    .map_err(mkerr)?;
+    .map_err(|e| run_err(opts, ctx, e))?;
+    Ok(status.code().unwrap_or(-1))
+}
+
+/// Adds forced-colour env so a child (cargo, npm, …) keeps its own colours even
+/// though its stdout is now a pipe — but only when the prefix itself is
+/// coloured, and never overriding a var the step set explicitly.
+fn force_color(command: &mut Command, opts: &Opts, sink: &OutputSink) {
+    for (k, v) in sink.color_env() {
+        if !opts.env.iter().any(|(ek, _)| ek == *k) {
+            command.env(k, v);
+        }
+    }
+}
+
+/// Reads a child pipe line-by-line, emitting each line through the sink. A final
+/// line without a trailing newline (a prompt, a progress bar) is emitted on EOF.
+fn spawn_line_reader<'scope, R: Read + Send + 'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    reader: Option<R>,
+    sink: &'scope OutputSink,
+    stream: Stream,
+) -> Option<std::thread::ScopedJoinHandle<'scope, ()>> {
+    let mut reader = BufReader::new(reader?);
+    Some(scope.spawn(move || {
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                        buf.pop();
+                    }
+                    sink.line(stream, &String::from_utf8_lossy(&buf));
+                }
+            }
+        }
+    }))
+}
+
+fn run_streamed(argv: &[String], opts: &Opts, sink: &OutputSink, ctx: &str) -> mlua::Result<i32> {
+    let mut command = command(argv, opts);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if opts.stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    force_color(&mut command, opts, sink);
+    let mut child = command.spawn().map_err(|e| run_err(opts, ctx, e))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdin = child.stdin.take();
+    let status = std::thread::scope(|scope| {
+        let feeder = spawn_feeder(scope, stdin, opts.stdin.as_deref());
+        let out_h = spawn_line_reader(scope, stdout, sink, Stream::Stdout);
+        let err_h = spawn_line_reader(scope, stderr, sink, Stream::Stderr);
+        let status = match opts.timeout {
+            Some(timeout) => wait_deadline(&mut child, Instant::now() + timeout, timeout),
+            None => child.wait(),
+        };
+        // Drain both pipes before returning so all output precedes the marker.
+        for h in [out_h, err_h].into_iter().flatten() {
+            let _ = h.join();
+        }
+        finish(status, feeder)
+    })
+    .map_err(|e| run_err(opts, ctx, e))?;
     Ok(status.code().unwrap_or(-1))
 }
 
@@ -333,11 +473,14 @@ fn cmd_step(t: &Table, ctx: &mut StepCtx) -> mlua::Result<()> {
     let template: String = t.get(1)?;
     let (opts, allow_fail) = step_opts(Some(t), ctx)?;
     let argv = tokenize(&ctx.fmt(&template)?, &template)?;
-    let code = run_ctx(&argv, &opts, &format!("command: {template}"))?;
+    let code = run_ctx(&argv, &opts, ctx.output, &format!("command: {template}"))?;
     if code != 0 && !allow_fail {
-        return Err(mlua::Error::external(format!(
-            "command failed (exit {code}): {template}"
-        )));
+        // Note the command with task vars resolved but env refs left literal.
+        return Err(
+            taku_api::Diag::new(format!("command exited with status {code}"))
+                .note(resolve_display(&template, ctx.vars))
+                .into_lua(),
+        );
     }
     Ok(())
 }
@@ -353,11 +496,9 @@ fn argv_step(t: &Table, ctx: &mut StepCtx) -> mlua::Result<()> {
     if argv.is_empty() {
         return Err(mlua::Error::external("argv{}: empty argument list"));
     }
-    let code = run_ctx(&argv, &opts, "argv command")?;
+    let code = run_ctx(&argv, &opts, ctx.output, "argv command")?;
     if code != 0 && !allow_fail {
-        return Err(mlua::Error::external(format!(
-            "command failed (exit {code})"
-        )));
+        return Err(taku_api::Diag::new(format!("command exited with status {code}")).into_lua());
     }
     Ok(())
 }
@@ -387,42 +528,72 @@ fn pipe_step(t: &Table, ctx: &mut StepCtx) -> mlua::Result<()> {
         return Err(mlua::Error::external("pipe{}: no commands"));
     }
 
+    let sink = ctx.output;
     let mut children = KillOnDrop(Vec::new());
     let mut prev_stdout = None;
+    // With a sink, the last stage's stdout and every stage's stderr are piped so
+    // they can be streamed under the task prefix; otherwise they inherit.
+    let mut stderrs = Vec::new();
+    let mut last_stdout = None;
     for (i, template) in templates.iter().enumerate() {
         let argv = tokenize(&ctx.fmt(template)?, template)?;
         let mut cmd = command(&argv, &opts);
         if let Some(out) = prev_stdout.take() {
             cmd.stdin(Stdio::from(out));
         }
-        if i + 1 < templates.len() {
+        let is_last = i + 1 == templates.len();
+        if !is_last || sink.is_some() {
             cmd.stdout(Stdio::piped());
+        }
+        if let Some(sink) = sink {
+            cmd.stderr(Stdio::piped());
+            // Only the last stage's stdout reaches the terminal via the sink;
+            // forcing colour on intermediates injects ANSI into the next stage's stdin.
+            if is_last {
+                force_color(&mut cmd, &opts, sink);
+            }
         }
         let mut child = cmd
             .spawn()
             .map_err(|e| mlua::Error::external(format!("{template}: {e}")))?;
-        prev_stdout = child.stdout.take();
+        if sink.is_some() {
+            stderrs.extend(child.stderr.take());
+        }
+        match child.stdout.take() {
+            out if is_last => last_stdout = out,
+            out => prev_stdout = out,
+        }
         children.0.push((template, child));
     }
 
     // One deadline for the whole pipeline (not per stage).
     let deadline = opts.timeout.map(|t| Instant::now() + t);
-    let mut failed = None;
-    for (template, child) in &mut children.0 {
-        let status = match (deadline, opts.timeout) {
-            (Some(deadline), Some(timeout)) => wait_deadline(child, deadline, timeout),
-            _ => child.wait(),
+    let failed = std::thread::scope(|scope| -> mlua::Result<Option<(i32, String)>> {
+        if let Some(sink) = sink {
+            for se in stderrs.drain(..) {
+                spawn_line_reader(scope, Some(se), sink, Stream::Stderr);
+            }
+            spawn_line_reader(scope, last_stdout.take(), sink, Stream::Stdout);
         }
-        .map_err(|e| mlua::Error::external(format!("{template}: {e}")))?;
-        if !status.success() && failed.is_none() {
-            failed = Some(format!(
-                "pipeline command failed (exit {}): {template}",
-                status.code().unwrap_or(-1)
-            ));
+        let mut failed = None;
+        for (template, child) in &mut children.0 {
+            let status = match (deadline, opts.timeout) {
+                (Some(deadline), Some(timeout)) => wait_deadline(child, deadline, timeout),
+                _ => child.wait(),
+            }
+            .map_err(|e| mlua::Error::external(format!("{template}: {e}")))?;
+            if !status.success() && failed.is_none() {
+                failed = Some((status.code().unwrap_or(-1), template.clone()));
+            }
         }
-    }
+        Ok(failed)
+    })?;
     match failed {
-        Some(msg) if !allow_fail => Err(mlua::Error::external(msg)),
+        Some((code, template)) if !allow_fail => Err(taku_api::Diag::new(format!(
+            "command exited with status {code}"
+        ))
+        .note(resolve_display(&template, ctx.vars))
+        .into_lua()),
         _ => Ok(()),
     }
 }
@@ -435,16 +606,22 @@ pub const API: taku_api::ApiEntry = taku_api::ApiEntry {
             tag: "cmd",
             arg: Arg::Hidden,
             run: |_, t, ctx| cmd_step(t, ctx),
+            fields: CMD_FIELDS,
+            positional: None,
         },
         StepDef {
             tag: "argv",
             arg: Arg::Table,
             run: |_, t, ctx| argv_step(t, ctx),
+            fields: CMD_FIELDS,
+            positional: None,
         },
         StepDef {
             tag: "pipe",
             arg: Arg::Table,
             run: |_, t, ctx| pipe_step(t, ctx),
+            fields: PIPE_FIELDS,
+            positional: None,
         },
     ],
 };
@@ -458,10 +635,10 @@ pub fn register(lua: &Lua, dotenv: Arc<HashMap<String, String>>) -> mlua::Result
             let argv = parse_argv(cmd)?;
             let code = run(&argv, &parse_opts(&d_run, opts)?)?;
             if code != 0 {
-                return Err(mlua::Error::external(format!(
-                    "cmd.run({}): exit {code}",
-                    argv.join(" ")
-                )));
+                // Same diagnostic as a failing command step.
+                return Err(taku_api::Diag::new(format!("command exited with status {code}"))
+                    .note(argv.join(" "))
+                    .into_lua());
             }
             Ok(())
         },
@@ -545,7 +722,10 @@ mod tests {
     fn run_raises_on_nonzero_exit() {
         run(r#"cmd.run({ "true" })"#);
         let err = lua().load(r#"cmd.run({ "false" })"#).exec().unwrap_err();
-        assert!(err.to_string().contains("exit 1"), "got: {err}");
+        assert!(
+            err.to_string().contains("command exited with status 1"),
+            "got: {err}"
+        );
     }
 
     #[test]

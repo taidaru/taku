@@ -33,6 +33,54 @@ pub fn ext<E: std::fmt::Display>(ctx: &str, e: E) -> mlua::Error {
     mlua::Error::external(format!("{ctx}: {e}"))
 }
 
+/// A structured error an effect can raise so the runtime renders it with a
+/// `note:`/`help:` line instead of a bare message. The runtime downcasts it out
+/// of the `mlua::Error` and keeps the code frame it recovers from the traceback.
+#[derive(Debug, Clone)]
+pub struct Diag {
+    pub message: String,
+    pub note: Option<String>,
+    pub help: Option<String>,
+    /// Suppress the code frame the runtime would otherwise recover from the
+    /// traceback (e.g. an import cycle, where the snippet adds no value).
+    pub no_frame: bool,
+}
+
+impl Diag {
+    pub fn new(message: impl Into<String>) -> Self {
+        Diag {
+            message: message.into(),
+            note: None,
+            help: None,
+            no_frame: false,
+        }
+    }
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+    pub fn help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+    pub fn no_frame(mut self) -> Self {
+        self.no_frame = true;
+        self
+    }
+    /// Wraps this into an `mlua::Error` for a step/effect to return.
+    pub fn into_lua(self) -> mlua::Error {
+        mlua::Error::external(self)
+    }
+}
+
+impl std::fmt::Display for Diag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for Diag {}
+
 std::thread_local! {
     /// Load vs runtime phase. Thread-local because each task body runs in its
     /// own worker thread with its own Lua state.

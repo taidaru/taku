@@ -33,6 +33,13 @@ pub(crate) struct Ctx {
     /// Task names currently on the `invoke` call chain, for cycle detection —
     /// the planner only sees header deps, not `invoke` steps.
     pub invoke_stack: Vec<String>,
+    /// Where command steps and services stream their child output, if the run
+    /// prefixes output (a real scheduled run) rather than inheriting (tests).
+    pub output: Option<taku_api::steps::OutputSink>,
+    /// `--json`: service/info lines this task emits are JSON objects.
+    pub json: bool,
+    /// `--quiet`: suppress warnings/info this task would emit.
+    pub quiet: bool,
 }
 
 impl Ctx {
@@ -45,6 +52,17 @@ impl Ctx {
 pub(crate) enum Flow {
     Continue,
     Skip,
+    /// Stop the task early, but count it as run (a non-last `serve`, which ends
+    /// the task after starting its service).
+    Stop,
+}
+
+/// Whether a task executed its steps or was short-circuited by an `unchanged`
+/// guard. Drives the `✓`/`- skipped` marker the scheduler prints.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Outcome {
+    Ran,
+    Skipped,
 }
 
 /// Registry key holding the live `ctx.vars` table while a function-step runs,
@@ -78,11 +96,13 @@ pub(crate) fn validate_vars(
     for (k, v) in vars {
         if !declared.iter().any(|d| d == k) {
             let name: String = spec.get("name")?;
-            let mut msg = format!("task '{name}' has no <{k}> parameter");
+            let mut diag = crate::diagnostic::Diagnostic::error(format!(
+                "task '{name}' has no parameter '{k}'"
+            ));
             if let Some(close) = crate::taskdef::closest(k, &declared) {
-                msg.push_str(&format!(" (did you mean '{close}'?)"));
+                diag = diag.help(format!("did you mean '{close}'?"));
             }
-            return Err(Error::TaskFailed(msg));
+            return Err(Error::Task(Box::new(diag)));
         }
         out.insert(k.clone(), v.clone());
     }
@@ -119,10 +139,14 @@ pub(crate) fn initial_vars(spec: &Table) -> mlua::Result<HashMap<String, String>
 }
 
 fn handler(apis: &'static [ApiEntry], tag: &str) -> Option<StepFn> {
+    step_def(apis, tag).map(|def| def.run)
+}
+
+/// The `StepDef` registered for `tag`, across the runtime builtins and API crates.
+fn step_def(apis: &'static [ApiEntry], tag: &str) -> Option<&'static taku_api::steps::StepDef> {
     all_apis(apis)
         .flat_map(|api| api.steps)
         .find(|def| def.tag == tag)
-        .map(|def| def.run)
 }
 
 pub(crate) fn run_steps(
@@ -130,16 +154,22 @@ pub(crate) fn run_steps(
     apis: &'static [ApiEntry],
     spec: &Table,
     ctx: &mut Ctx,
-) -> Result<(), Error> {
+) -> Result<Outcome, Error> {
     let steps: Table = spec.get("steps")?;
     let len = steps.raw_len();
     for (i, step) in steps.sequence_values::<Value>().enumerate() {
-        let flow = run_step(lua, apis, spec, step?, ctx, i + 1 == len).map_err(|e| match e {
-            Error::TaskFailed(msg) => Error::TaskFailed(format!("step {}: {msg}", i + 1)),
-            other => other,
-        })?;
-        if matches!(flow, Flow::Skip) {
-            return Ok(());
+        let last = i + 1 == len;
+        let flow = match run_step(lua, apis, spec, step?, ctx, last, i) {
+            Ok(flow) => flow,
+            Err(e) => {
+                let vars = ctx.vars.clone();
+                return Err(framed_step_error(lua, spec, i, &vars, e));
+            }
+        };
+        match flow {
+            Flow::Skip => return Ok(Outcome::Skipped),
+            Flow::Stop => break,
+            Flow::Continue => {}
         }
     }
     if let Some((path, state)) = ctx.pending_state.take() {
@@ -148,7 +178,158 @@ pub(crate) fn run_steps(
         }
         std::fs::write(path, state)?;
     }
-    Ok(())
+    Ok(Outcome::Ran)
+}
+
+/// Shapes a step failure into a task diagnostic, attaching a code frame from the
+/// source map when the error didn't already carry one (data-steps have no Lua
+/// traceback, so their frame comes from the scan).
+fn framed_step_error(
+    lua: &Lua,
+    spec: &Table,
+    index: usize,
+    vars: &HashMap<String, String>,
+    e: Error,
+) -> Error {
+    // `invoke "typo"` gets the task-not-found diagnostic with a did-you-mean edit.
+    if let Some(bad) = invoke_unknown(&e) {
+        return invoke_unknown_diag(lua, spec, index, bad);
+    }
+    let mut diag = crate::diagnostic::from_error(&e);
+    let site = step_site(lua, spec, index);
+    if diag.frames.is_empty()
+        && let Some(site) = &site
+    {
+        diag = diag.frame(site.frame());
+    }
+    if diag.message.starts_with("stray '$' in template") {
+        diag = diag.help("escape the literal dollar sign");
+    }
+    // A `$NAME` env ref in a template that isn't set — same hint as env.require.
+    let env_help = diag
+        .helps
+        .is_empty()
+        .then(|| env_required(&diag.message))
+        .flatten()
+        .map(|name| format!("'export {name}=...' or 'echo \"{name}=...\" >> .env'"));
+    if let Some(help) = env_help {
+        diag = diag.help(help);
+    }
+    // `${typo}` in a template: suggest the nearest declared var + an edit.
+    if let Some(bad) = undefined_var(&diag.message) {
+        let names: Vec<String> = vars.keys().cloned().collect();
+        if let Some(close) = crate::taskdef::closest(&bad, &names) {
+            let msg = format!("did you mean '{close}'?");
+            match &site {
+                Some(site) => {
+                    let edit = crate::diagnostic::Edit {
+                        line: site.line,
+                        before: site.text.clone(),
+                        after: site.text.replacen(
+                            &format!("${{{bad}}}"),
+                            &format!("${{{close}}}"),
+                            1,
+                        ),
+                    };
+                    diag = diag.help_edit(msg, edit);
+                }
+                None => diag = diag.help(msg),
+            }
+        }
+    }
+    Error::Task(Box::new(diag))
+}
+
+/// The name in an `environment variable '<name>' is required but not set` message.
+fn env_required(message: &str) -> Option<&str> {
+    message
+        .strip_prefix("environment variable '")?
+        .strip_suffix("' is required but not set")
+}
+
+/// The name in an `undefined variable '${name}' in template` message.
+fn undefined_var(message: &str) -> Option<String> {
+    message
+        .strip_prefix("undefined variable '${")?
+        .strip_suffix("}' in template")
+        .map(str::to_string)
+}
+
+/// The name in an `invoke '<name>': no such task` error.
+fn invoke_unknown(e: &Error) -> Option<String> {
+    let Error::TaskFailed(msg) = e else {
+        return None;
+    };
+    msg.strip_prefix("invoke '")?
+        .strip_suffix("': no such task")
+        .map(str::to_string)
+}
+
+fn invoke_unknown_diag(lua: &Lua, spec: &Table, index: usize, bad: String) -> Error {
+    let mut diag = crate::diagnostic::Diagnostic::error(format!("task '{bad}' does not exist"));
+    let site = step_site(lua, spec, index);
+    if let Some(site) = &site {
+        diag = diag.frame(site.frame());
+    }
+    let names = task_names(lua);
+    if let Some(close) = crate::taskdef::closest(&bad, &names) {
+        match &site {
+            Some(site) => {
+                let edit = crate::diagnostic::Edit {
+                    line: site.line,
+                    before: site.text.clone(),
+                    after: site.text.replacen(&bad, close, 1),
+                };
+                diag = diag.help_edit(format!("did you mean '{close}'?"), edit);
+            }
+            None => diag = diag.help(format!("did you mean '{close}'?")),
+        }
+    }
+    Error::Task(Box::new(diag))
+}
+
+fn task_names(lua: &Lua) -> Vec<String> {
+    lua.named_registry_value::<Table>(TASKS_KEY)
+        .map(|t| {
+            t.pairs::<String, Table>()
+                .filter_map(Result::ok)
+                .map(|(k, _)| k)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The source-map site for the step at `index` of `spec`.
+fn step_site(lua: &Lua, spec: &Table, index: usize) -> Option<crate::srcmap::Site> {
+    let name: String = spec.get("name").ok()?;
+    let sources = lua.app_data_ref::<crate::srcmap::Sources>()?;
+    Some(sources.map.get(&name)?.steps.get(index)?.site.clone())
+}
+
+/// Warns that the step after a non-last `serve` is unreachable.
+fn warn_step_after_serve(lua: &Lua, spec: &Table, serve_index: usize, json: bool) {
+    let Some(after) = step_site(lua, spec, serve_index + 1) else {
+        return;
+    };
+    let mut diag = crate::diagnostic::Diagnostic::warning("step after 'serve' will never run")
+        .frame(after.frame());
+    if let Some(serve) = step_site(lua, spec, serve_index) {
+        diag = diag.note(format!(
+            "'serve' at {}:{} ends the task — later steps are unreachable",
+            serve.file, serve.line
+        ));
+    }
+    eprintln!(
+        "{}",
+        crate::diagnostic::renderer(json, crate::report::Style::init()).render(&diag)
+    );
+}
+
+/// The full source-map site (step + fields + closing brace) for step `index`.
+fn step_full_site(lua: &Lua, spec: &Table, index: usize) -> Option<crate::srcmap::StepSite> {
+    let name: String = spec.get("name").ok()?;
+    let sources = lua.app_data_ref::<crate::srcmap::Sources>()?;
+    Some(sources.map.get(&name)?.steps.get(index)?.clone())
 }
 
 fn dispatch(
@@ -165,10 +346,14 @@ fn dispatch(
         dotenv: &ctx.dotenv,
         formatter: format_step,
         yes: ctx.yes,
+        output: ctx.output.as_ref(),
     };
-    run(lua, t, &mut step_ctx).map_err(|e| Error::TaskFailed(e.to_string()))
+    // Keep the mlua error itself (not its string) so any structured `Diag`
+    // payload — note/help — survives into the diagnostic.
+    run(lua, t, &mut step_ctx).map_err(Error::Lua)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_step(
     lua: &Lua,
     apis: &'static [ApiEntry],
@@ -176,6 +361,7 @@ fn run_step(
     step: Value,
     ctx: &mut Ctx,
     last: bool,
+    index: usize,
 ) -> Result<Flow, Error> {
     if ctx.dry_run {
         return dry_step(lua, apis, spec, step, ctx);
@@ -205,6 +391,12 @@ fn run_step(
         }
         Value::Table(t) => {
             let tag: Option<String> = t.get(TAG)?;
+            // Schema check (unknown/missing/wrong-type fields) before running,
+            // using the schema the step's `StepDef` declares.
+            let site = step_full_site(lua, spec, index);
+            if let Some(def) = step_def(apis, tag.as_deref().unwrap_or("cmd")) {
+                crate::validate::check(&t, def.fields, def.positional.as_ref(), site.as_ref())?;
+            }
             match tag.as_deref() {
                 // { "cmd ...", cwd = ..., env = {...} }
                 None => {
@@ -227,10 +419,14 @@ fn run_step(
                     crate::incremental::Decision::Run => Ok(Flow::Continue),
                 },
                 Some("serve") => {
+                    // `serve` ends the task; a later step is unreachable — warn,
+                    // start the service, and skip the rest.
                     if !last {
-                        return Err(Error::TaskFailed(
-                            "'serve' must be the last step of a task".to_string(),
-                        ));
+                        if !ctx.quiet {
+                            warn_step_after_serve(lua, spec, index, ctx.json);
+                        }
+                        crate::serve::run(spec, &t, ctx)?;
+                        return Ok(Flow::Stop);
                     }
                     cont(crate::serve::run(spec, &t, ctx))
                 }
@@ -297,7 +493,7 @@ fn dry_table(tag: &str, t: &Table) -> Result<String, Error> {
     let mut out = tag.to_string();
     for v in t.sequence_values::<Value>() {
         out.push(' ');
-        crate::incremental::write_value(&mut out, &v?);
+        crate::incremental::write_value(&mut out, &v?, false);
     }
     let mut named: Vec<(String, Value)> = Vec::new();
     for pair in t.pairs::<Value, Value>() {
@@ -312,7 +508,7 @@ fn dry_table(tag: &str, t: &Table) -> Result<String, Error> {
     named.sort_by(|a, b| a.0.cmp(&b.0));
     for (k, v) in named {
         out.push_str(&format!(" {k}="));
-        crate::incremental::write_value(&mut out, &v);
+        crate::incremental::write_value(&mut out, &v, false);
     }
     Ok(out)
 }
@@ -362,6 +558,10 @@ fn run_invoke(
         services: ctx.services.clone(),
         pending_state: None,
         invoke_stack,
+        // an invoked task's steps stream under the invoking task's prefix
+        output: ctx.output.clone(),
+        json: ctx.json,
+        quiet: ctx.quiet,
     };
     // Validated like `--vars` so an invoke with an unknown/missing param
     // errors instead of silently passing through.
@@ -373,8 +573,13 @@ fn run_invoke(
         }
         sub.vars.extend(validate_vars(&spec, &pairs)?);
     }
-    run_steps(lua, apis, &spec, &mut sub)
-        .map_err(|e| Error::TaskFailed(format!("invoke '{name}': {e}")))
+    match run_steps(lua, apis, &spec, &mut sub) {
+        Ok(_) => Ok(()),
+        // A task diagnostic already frames the failing inner step and carries
+        // its notes/help — keep it instead of flattening to a string.
+        Err(e @ Error::Task(_)) => Err(e),
+        Err(e) => Err(Error::TaskFailed(format!("invoke '{name}': {e}"))),
+    }
 }
 
 #[cfg(test)]
@@ -396,8 +601,15 @@ mod tests {
         assert_eq!(ok["sha"], "abc");
 
         let err = validate_vars(&spec, &[("sah".into(), "abc".into())]).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("no <sah> parameter"), "got: {msg}");
-        assert!(msg.contains("did you mean 'sha'?"), "got: {msg}");
+        let Error::Task(diag) = err else {
+            panic!("expected a task diagnostic, got: {err}");
+        };
+        assert_eq!(diag.message, "task 'build' has no parameter 'sah'");
+        assert!(
+            diag.helps
+                .iter()
+                .any(|h| h.message == "did you mean 'sha'?"),
+            "missing hint: {diag:?}"
+        );
     }
 }

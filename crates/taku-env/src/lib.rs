@@ -22,7 +22,11 @@ pub fn register(lua: &mlua::Lua, dotenv: Arc<HashMap<String, String>>) -> mlua::
         },
         require => move |_, name: String| {
             get(&dotenv, &name).ok_or_else(|| {
-                mlua::Error::external(format!("env.require('{name}'): variable is not set"))
+                taku_api::Diag::new(format!(
+                    "environment variable '{name}' is required but not set"
+                ))
+                .help(format!("'export {name}=...' or 'echo \"{name}=...\" >> .env'"))
+                .into_lua()
             })
         },
     })
